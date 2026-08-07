@@ -24,18 +24,24 @@ is no v1 board support — code should not use `HW_VERSION` guards.
 - A game's directory must contain `<Name>.ino` — the file name must match the
   directory name (PlatformIO convention).
 - There is no test suite or linter; a clean build is the verification.
-- **Privilege mode (critical):** the framework startup `cores/arduino/ch32/
-  startup_ch32yyxx.S` → `system/CH32X035/SRC/Startup/startup_ch32x035.S` is
-  **patched** to `csrs mstatus, 0x1888` instead of stock `0x88`. Stock `0x88`
-  has MPP=00, so after `handle_reset`/`mret` everything (bootloader runtime and
-  any app it jumps to) runs in **USER mode**, where M-only CSR writes
-  (`mtvec`, `mstatus`, `mepc`, `mret`) and `0xbc0` trap as illegal
-  instructions and hang silently — only user custom CSRs (`0x804`, `0x800`)
-  work. `0x1888` sets MPP=11 (machine mode) and is how every build must run;
-  the bootloader must hand M-mode to the app. This patch lives OUTSIDE the
-  repo in `~/.platformio/packages/framework-arduino-openwch-ch32/` and is
-  silently reverted if the package is ever reinstalled — re-apply it (search
-  for `0x88`/`csrs mstatus` in that startup and change to `0x1888`).
+- **Privilege mode (critical):** `cores/arduino/ch32/startup_ch32yyxx.S` pulls
+  in the machine startup via `#include "startup_ch32x035.S"`. The repo
+  **overrides** that file: `framework_overrides/startup_ch32x035.S` is a
+  vendored copy patched to `csrs mstatus, 0x1888` instead of stock `0x88`
+  (MPP=11 machine mode). Stock `0x88` has MPP=00, so after `handle_reset`/
+  `mret` everything (bootloader runtime and any app it jumps to) runs in
+  **USER mode**, where M-only CSR writes (`mtvec`, `mstatus`, `mepc`, `mret`)
+  and `0xbc0` trap as illegal instructions and hang silently — only user
+  custom CSRs (`0x804`, `0x800`) work. The override is wired via
+  `extra_scripts = pre:framework_overrides/override_startup.py` in
+  `platformio.ini`, which PREPENDS `framework_overrides/` to the include path
+  so the quoted include resolves there before the framework's own
+  `system/CH32X035/SRC/Startup/` dir. This applies to BOTH `make build` and
+  `make build-game` (games override `build_flags` but not `extra_scripts`).
+  The framework file on disk is stock `0x88` — do not patch it; keep the
+  override vendored file in sync with the framework version instead. After
+  updating/adding the override, clear the cached framework objects
+  (`rm -rf .pio/build/v2/FrameworkArduino .pio/build/v2/FrameworkArduinoVariant`).
 - `linker/app_flash.ld` uses `KEEP(*(.vector))`: without it, `--gc-sections`
   drops the app's whole vector table (the image shows 0x3C zero bytes of ALIGN
   padding at `0x8004`), so IRQ dispatch jumps through zeros. Do not remove the
