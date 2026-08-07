@@ -26,13 +26,13 @@ APP_VERSION = 1
 HEADER_SIZE = 20
 
 
-def main():
-    if len(sys.argv) != 3:
-        print("Usage: mkapp.py <firmware.bin> <out.bin>")
-        return 2
+def wrap_image(src, dst):
+    """Wrap the raw game image at `src` into the PH25-wrapped image at `dst`.
 
-    src, dst = sys.argv[1], sys.argv[2]
-
+    Returns 0 on success, 1 if the image exceeds the app-region limit. Shared
+    by the CLI below and the PlatformIO post-build hook
+    (prog_tools/pio_post_build.py).
+    """
     with open(src, "rb") as f:
         code = f.read()
 
@@ -58,6 +58,14 @@ def main():
     print(f"Wrote {dst}: {len(code)} bytes code + {HEADER_SIZE}-byte header, "
           f"crc32={crc:08x}, loadaddr={APP_BASE:#x}")
     return 0
+
+
+def main():
+    if len(sys.argv) != 3:
+        print("Usage: mkapp.py <firmware.bin> <out.bin>")
+        return 2
+
+    return wrap_image(sys.argv[1], sys.argv[2])
 
 
 if __name__ == "__main__":

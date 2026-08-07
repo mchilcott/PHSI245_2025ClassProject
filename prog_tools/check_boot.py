@@ -15,12 +15,13 @@ import sys
 from mkapp import APP_BASE
 
 
-def main():
-    if len(sys.argv) != 2:
-        print("Usage: check_boot.py <firmware.bin>")
-        return 2
+def check_image(path):
+    """Return 0 if the bootloader image at `path` stays below APP_BASE, else 1.
 
-    with open(sys.argv[1], "rb") as f:
+    Shared by the CLI below and the PlatformIO post-build hook
+    (prog_tools/pio_post_build.py).
+    """
+    with open(path, "rb") as f:
         size = len(f.read())
 
     end = 0x00000000 + size
@@ -39,6 +40,14 @@ def main():
         f"(headroom to APP_BASE 0x{APP_BASE:04x}: {APP_BASE - end} bytes)"
     )
     return 0
+
+
+def main():
+    if len(sys.argv) != 2:
+        print("Usage: check_boot.py <firmware.bin>")
+        return 2
+
+    return check_image(sys.argv[1])
 
 
 if __name__ == "__main__":

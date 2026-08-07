@@ -10,6 +10,24 @@ is no v1 board support — code should not use `HW_VERSION` guards.
 
 - `make build` builds the bootloader (`src/`) for v2. `make upload` builds and
   flashes.
+- The bootloader check (`check_boot.py`) + copy to `build/bootloader.bin`, and
+  the game wrap (`mkapp.py`) into `build/games/<Name>.bin`, also run
+  automatically from plain `pio run` via the
+  `post:prog_tools/pio_post_build.py` extra script (`platformio.ini`), so the
+  Makefile is optional. The Makefile calls them explicitly too; both paths are
+  idempotent.
+- **VS Code-only workflow (no Make):** use the generated tasks in
+  `.vscode/tasks.json` (regenerate with `python3 prog_tools/gen_tasks.py`, or
+  run the **Refresh Games List** task when a game is added/removed):
+  - **Upload Bootloader** — `pio run -e v2 -t upload` from `src_os`; writes
+    `build/bootloader.bin` and programs it.
+  - **Build Game: `<Name>`** — `pio run -e v2` with `PLATFORMIO_SRC_DIR` and
+    `PLATFORMIO_BUILD_FLAGS` set (mirrors `make build-game`); wraps the image
+    into `build/games/<Name>.bin` for SD-card use.
+  - **Upload Game: `<Name>`** — same but with `-t upload`; the `upload_command`
+    runs `prog_tools/pio_upload.py`, which programs the whole bootloader + game
+    + descriptor pair in one pass (`chip_tool flash-pair`). Upload the
+    bootloader once before any game upload.
 - `make build-game GAME=<Name>` builds a game from `src_games/<Name>/`. The
   `GAME` var is required; the target overrides `src_dir` via the
   `PLATFORMIO_SRC_DIR` env var, so `platformio.ini` is never modified. The
@@ -18,6 +36,9 @@ is no v1 board support — code should not use `HW_VERSION` guards.
   `Link.ld`), then wrapped with a 20-byte `PH25` header + CRC-32 by
   `prog_tools/mkapp.py` into `build/games/<GAME>.bin`. Copy that file to the
   SD card and select it with **A** in the bootloader browser.
+- `pio run -e v2 -t upload` from `src_os` flashes the bootloader (via
+  `prog_tools/pio_upload.py` → `chip_tool flash`); with `PLATFORMIO_SRC_DIR=src_games/<Name>`
+  it flashes the bootloader + game pair instead.
 - Games are limited to 30207 bytes of code (app region `0x8100`–`0xF6FF`);
   `mkapp.py` rejects larger builds. `APP_BASE`/`APP_MAX_SIZE` live in
   `src/flash_load.h` and must match `linker/app_flash.ld` and `mkapp.py`.
@@ -50,10 +71,13 @@ is no v1 board support — code should not use `HW_VERSION` guards.
   drops the app's whole vector table (the image shows 0x3C zero bytes of ALIGN
   padding at `0x8004`), so IRQ dispatch jumps through zeros. Do not remove the
   `KEEP`.
-- Flashing requires `pip install chprog`. The `lab_machines` env (the
-  `default_envs` in `platformio.ini`) uploads via
-  `python3 prog_tools/program.py $SOURCE`. Linux needs udev rules; lab
-  machines choke on UNC paths — see `README.md`.
+- Flashing requires `pip install chprog` — install it into the PlatformIO
+  terminal (PIO's bundled Python), or a system Python will be used via the
+  fallback in `prog_tools/pio_upload.py`. The `upload_command` in
+  `platformio.ini` runs the wrapper with `$PYTHONEXE` (PIO's Python) and
+  re-execs under `python3`/`python`/`py` if that interpreter lacks
+  `pyusb`/`chprog`. The device must be in BOOT mode (hold the BOOT pin/button).
+  Linux needs udev rules; lab machines choke on UNC paths — see `README.md`.
 
 ## Bootloader (`src/main.cpp`)
 
