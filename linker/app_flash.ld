@@ -30,7 +30,7 @@ SECTIONS
 
   	.vector :
   	{
-      *(.vector);
+      KEEP(*(.vector));
 	  . = ALIGN(64);
   	} >FLASH AT>FLASH
 

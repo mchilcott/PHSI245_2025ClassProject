@@ -20,6 +20,13 @@ void setup()
     gfx::init();
     gfx::setTextSize(1);
     gfx::setTextColor(GFX_WHITE);
+
+    // Touch buttons need explicit init in an app (the bootloader does this at
+    // boot, but an app binary has its own zeroed threshold arrays). initTouch
+    // configures the ADC/TKey hardware + defaults; touchCalibrate() loads the
+    // calibration the bootloader stored in EEPROM when it matches this build.
+    initTouchButtons();
+    touchCalibrate();
 }
 
 void drawTitle(const char *title)

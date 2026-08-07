@@ -24,6 +24,22 @@ is no v1 board support — code should not use `HW_VERSION` guards.
 - A game's directory must contain `<Name>.ino` — the file name must match the
   directory name (PlatformIO convention).
 - There is no test suite or linter; a clean build is the verification.
+- **Privilege mode (critical):** the framework startup `cores/arduino/ch32/
+  startup_ch32yyxx.S` → `system/CH32X035/SRC/Startup/startup_ch32x035.S` is
+  **patched** to `csrs mstatus, 0x1888` instead of stock `0x88`. Stock `0x88`
+  has MPP=00, so after `handle_reset`/`mret` everything (bootloader runtime and
+  any app it jumps to) runs in **USER mode**, where M-only CSR writes
+  (`mtvec`, `mstatus`, `mepc`, `mret`) and `0xbc0` trap as illegal
+  instructions and hang silently — only user custom CSRs (`0x804`, `0x800`)
+  work. `0x1888` sets MPP=11 (machine mode) and is how every build must run;
+  the bootloader must hand M-mode to the app. This patch lives OUTSIDE the
+  repo in `~/.platformio/packages/framework-arduino-openwch-ch32/` and is
+  silently reverted if the package is ever reinstalled — re-apply it (search
+  for `0x88`/`csrs mstatus` in that startup and change to `0x1888`).
+- `linker/app_flash.ld` uses `KEEP(*(.vector))`: without it, `--gc-sections`
+  drops the app's whole vector table (the image shows 0x3C zero bytes of ALIGN
+  padding at `0x8004`), so IRQ dispatch jumps through zeros. Do not remove the
+  `KEEP`.
 - Flashing requires `pip install chprog`. The `lab_machines` env (the
   `default_envs` in `platformio.ini`) uploads via
   `python3 prog_tools/program.py $SOURCE`. Linux needs udev rules; lab
