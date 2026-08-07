@@ -4,15 +4,9 @@
 #define OLED_I2C_CLKRATE   800000   // I2C bus clock rate (Hz)
 #define OLED_I2C_PORT I2C1
 
-#if HW_VERSION == 2
-    // I2C1 PartialRemap1: SCL=PA13, SDA=PA14
-    #define OLED_I2C_SCL_PIN GPIO_Pin_13
-    #define OLED_I2C_SDA_PIN GPIO_Pin_14
-#else
-    // Default I2C1: SCL=PA10, SDA=PA11
-    #define OLED_I2C_SCL_PIN GPIO_Pin_10
-    #define OLED_I2C_SDA_PIN GPIO_Pin_11
-#endif
+// I2C1 PartialRemap1: SCL=PA13, SDA=PA14
+#define OLED_I2C_SCL_PIN GPIO_Pin_13
+#define OLED_I2C_SDA_PIN GPIO_Pin_14
 
 #define OLED_ADDR         0x3C    // OLED write address (0x3C << 1)
 
@@ -25,10 +19,17 @@ void i2c_init(void) {
     RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOB, ENABLE);
     RCC_APB1PeriphClockCmd(RCC_APB1Periph_I2C1, ENABLE);
 
-#if HW_VERSION == 2
     RCC_APB2PeriphClockCmd(RCC_APB2Periph_AFIO, ENABLE);
     GPIO_PinRemapConfig(GPIO_PartialRemap1_I2C1, ENABLE);
-#endif
+
+    // Bug: the Arduino framework's GPIO_PartialRemap1_I2C1 constant
+    // (0x08000004) makes GPIO_PinRemapConfig() clear PCFR1 bits [2:0],
+    // wiping the SPI1_REMAP bits [1:0] at the same time. The SD card is on
+    // SPI1 remapped to PA9-PA12, so a later i2c_init() (e.g. the duplicate
+    // gfx::init() in setup()) silently un-maps SPI1 and the card goes dead
+    // (every read returns R1=0xFF). Re-assert the SPI1 remap here so this
+    // init is order-independent.
+    GPIO_PinRemapConfig(GPIO_PartialRemap2_SPI1, ENABLE);
 
     // Reset I2C peripheral to clear any stuck state
     RCC_APB1PeriphResetCmd(RCC_APB1Periph_I2C1, ENABLE);

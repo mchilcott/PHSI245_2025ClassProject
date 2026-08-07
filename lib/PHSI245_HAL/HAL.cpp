@@ -4,19 +4,18 @@
 
 uint16_t TouchState (0);
 
-// Per-channel calibrated thresholds (loaded from EEPROM on v2)
+// Per-channel calibrated thresholds (loaded from EEPROM)
 static uint16_t touchThreshold[TOUCH_MAX_CHANNELS];
 static uint16_t touchDebounce[TOUCH_MAX_CHANNELS];
 static bool     touchCalibrated = false;
 
-// Map pin name to ADC touch-key channel (TK0-TK9)
+// Map pin name to ADC touch-key channel (TK0-TK9).
+// Arduino pin numbers are 0xC0+ (PIN_A0..); the ADC channel is the low index.
 uint8_t pin_to_touch_adc(uint8_t pin)
 {
-    if (pin <= PA7) return pin; // PA0-PA7 -> ADC channels 0-7
-#if HW_VERSION == 2
+    if (pin >= PA0 && pin <= PA7) return pin - PA0; // PA0-PA7 -> ADC channels 0-7
     if (pin == PB0) return 8;
     if (pin == PB1) return 9;
-#endif
     return 0;
 }
 
@@ -35,22 +34,17 @@ void initTouchButtons()
 	RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOB, ENABLE );
     RCC_APB2PeriphClockCmd(RCC_APB2Periph_ADC1, ENABLE );
 
-    // GPIOA pins: UP, LEFT, DOWN, RIGHT (PA0-PA3), plus A/B on v1 (PA5/PA4)
-#if HW_VERSION == 1
-    const unsigned char pa_pins[6] = {PIN_BTN_UP, PIN_BTN_LEFT, PIN_BTN_DOWN, PIN_BTN_RIGHT, PIN_BTN_A, PIN_BTN_B};
-    const uint8_t pa_count = 6;
-#else
+    // GPIOA pins: UP, LEFT, DOWN, RIGHT (PA0-PA3)
     const unsigned char pa_pins[4] = {PIN_BTN_UP, PIN_BTN_LEFT, PIN_BTN_DOWN, PIN_BTN_RIGHT};
     const uint8_t pa_count = 4;
-#endif
 	for (uint8_t i = 0; i < pa_count; ++i)
 	{
-		GPIO_InitStructure.GPIO_Pin = (1 << pa_pins[i]);
+		uint8_t ch = pin_to_touch_adc(pa_pins[i]);
+		GPIO_InitStructure.GPIO_Pin = (1 << ch); // PA pins map 1:1 to ADC channels
 		GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AIN;
 		GPIO_Init(GPIOA, &GPIO_InitStructure);
 	}
 
-#if HW_VERSION == 2
     // GPIOB pins: A, B (PB0-PB1, ADC channels 8-9)
     const uint16_t pb_pins[2] = {GPIO_Pin_0, GPIO_Pin_1};
     for (int i = 0; i < 2; ++ i)
@@ -59,7 +53,6 @@ void initTouchButtons()
         GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AIN;
         GPIO_Init(GPIOB, &GPIO_InitStructure);
     }
-#endif
 
     ADC_CLKConfig(ADC1, ADC_CLK_Div6);
     ADC_InitStructure.ADC_Mode = ADC_Mode_Independent;
@@ -112,6 +105,11 @@ int IsTouched(unsigned long int channel)
 // Offset 12 stores a build hash to detect firmware reflash.
 #define CALIB_EEPROM_OFFSET 0
 #define CALIB_HASH_OFFSET   12
+
+// Stable marker written with calibration data; any non-zero value means a
+// calibration exists. Bump when the calibration FORMAT changes so old stored
+// data (e.g. 0xE00-clamped thresholds that latch buttons on v2) is ignored.
+#define CALIB_FW_HASH       0x5B
 
 // Packed calibration: 8-bit values (threshold/16, debounce/16) per channel.
 struct CalibData {
@@ -210,7 +208,7 @@ static void doInteractiveCalibration(uint8_t buildHash)
 
         uint16_t thresh = minVal * 2;
         if (thresh < 0x300) thresh = 0x300;
-        if (thresh > 0xE00) thresh = 0xE00;
+        if (thresh > 0xC00) thresh = 0xC00;
 
         touchThreshold[ch] = thresh;
         touchDebounce[ch]  = thresh / 8;
@@ -262,8 +260,11 @@ void touchCalibrate()
 
     calibEEPROM.begin();
 
-    // Check if calibration already stored
-    if (calibEEPROM.read(CALIB_HASH_OFFSET) != 0) {
+    // Load stored calibration only if it matches the current firmware's
+    // calibration format (stable CALIB_FW_HASH). This ignores data written by
+    // older builds (e.g. the __DATE__/__TIME__-keyed or 0xE00-clamped values)
+    // that would leave buttons latched on this board.
+    if (calibEEPROM.read(CALIB_HASH_OFFSET) == CALIB_FW_HASH) {
         for (uint8_t i = 0; i < 6; i++) {
             uint8_t ch = calibChannelMap[i];
             touchThreshold[ch] = ((uint16_t)calibEEPROM.read(CALIB_EEPROM_OFFSET + i)) << 4;
@@ -317,6 +318,19 @@ void touchRecalibrate(uint8_t buildHash)
 
     calibEEPROM.begin();
     doInteractiveCalibration(buildHash);
+}
+
+void touchCalibrateNow()
+{
+    calibChannelMap[0] = pin_to_touch_adc(PIN_BTN_UP);
+    calibChannelMap[1] = pin_to_touch_adc(PIN_BTN_DOWN);
+    calibChannelMap[2] = pin_to_touch_adc(PIN_BTN_LEFT);
+    calibChannelMap[3] = pin_to_touch_adc(PIN_BTN_RIGHT);
+    calibChannelMap[4] = pin_to_touch_adc(PIN_BTN_A);
+    calibChannelMap[5] = pin_to_touch_adc(PIN_BTN_B);
+
+    calibEEPROM.begin();
+    doInteractiveCalibration(CALIB_FW_HASH);
 }
 
 bool touchIsCalibrated()

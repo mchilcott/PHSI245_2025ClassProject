@@ -40,6 +40,7 @@ static uint32_t rootDirCluster;   // FAT32: first cluster of root dir
 static uint32_t firstDataSector;
 static uint32_t firstFATSector;
 static uint32_t rootDirSectors;   // FAT16 only
+static uint32_t partStart;        // LBA of the FAT partition (0 = BPB at sector 0)
 
 // File state
 static uint32_t fileStartCluster;
@@ -358,26 +359,41 @@ Result mount(const BlockDevice *d)
     if (!dev->readBlock(0, sectorBuf))
         return DISK_ERR;
 
-    // Check for MBR (partition table at offset 0x1BE)
-    // If byte 0 is 0xEB or 0xE9, it's a BPB directly
+    // LBA offset of the FAT partition. All BPB offsets are relative to this;
+    // they are converted to absolute LBAs at the end of this function.
+    partStart = 0;
+
+    // If byte 0 is 0xEB or 0xE9, it's a BPB directly (no MBR).
+    // Otherwise look for an MBR and load the first partition's boot sector.
     if (sectorBuf[0] == 0xEB || sectorBuf[0] == 0xE9) {
         // BPB at sector 0
     } else if (sectorBuf[0x1FE] == 0x55 && sectorBuf[0x1FF] == 0xAA) {
         // MBR present — read first partition entry
         uint8_t *part = sectorBuf + 0x1BE;
-        uint32_t partStart = part[8] | ((uint32_t)part[9] << 8)
-                           | ((uint32_t)part[10] << 16) | ((uint32_t)part[11] << 24);
+        partStart = part[8] | ((uint32_t)part[9] << 8)
+                  | ((uint32_t)part[10] << 16) | ((uint32_t)part[11] << 24);
         if (!dev->readBlock(partStart, sectorBuf))
             return DISK_ERR;
     } else {
         return NO_FILESYSTEM;
     }
 
+    // exFAT boot sectors carry this signature at offset 3. This library only
+    // reads FAT12/16/32, so fail cleanly rather than mis-parsing the BPB.
+    if (memcmp(sectorBuf + 3, "EXFAT   ", 8) == 0)
+        return NO_FILESYSTEM;
+
     // Parse BPB
     bytesPerSector    = sectorBuf[11] | ((uint16_t)sectorBuf[12] << 8);
     sectorsPerCluster = sectorBuf[13];
     reservedSectors   = sectorBuf[14] | ((uint16_t)sectorBuf[15] << 8);
     numFATs           = sectorBuf[16];
+
+    // Reject anything that isn't a 512-byte-sector FAT volume before doing
+    // arithmetic with the geometry.
+    if (bytesPerSector != 512 || sectorsPerCluster == 0
+        || sectorsPerCluster > 128 || numFATs == 0)
+        return NO_FILESYSTEM;
     uint16_t rootEnts = sectorBuf[17] | ((uint16_t)sectorBuf[18] << 8);
     uint16_t totalSec16 = sectorBuf[19] | ((uint16_t)sectorBuf[20] << 8);
     uint32_t totalSec32 = sectorBuf[32] | ((uint32_t)sectorBuf[33] << 8)
@@ -389,6 +405,8 @@ Result mount(const BlockDevice *d)
         sectorsPerFAT = sectorBuf[36] | ((uint32_t)sectorBuf[37] << 8)
                       | ((uint32_t)sectorBuf[38] << 16) | ((uint32_t)sectorBuf[39] << 24);
     }
+    if (sectorsPerFAT == 0)
+        return NO_FILESYSTEM;
 
     uint32_t totalSectors = (totalSec16 != 0) ? totalSec16 : totalSec32;
 
@@ -412,7 +430,15 @@ Result mount(const BlockDevice *d)
         rootDirCluster = sectorBuf[44] | ((uint32_t)sectorBuf[45] << 8)
                        | ((uint32_t)sectorBuf[46] << 16) | ((uint32_t)sectorBuf[47] << 24);
         firstDataSector = reservedSectors + (numFATs * sectorsPerFAT); // no root dir area
+        if (rootDirCluster < 2)
+            return NO_FILESYSTEM;
     }
+
+    // All BPB offsets are relative to the partition start; convert the FAT
+    // and data areas to absolute LBAs for the block device. (partStart is 0
+    // when the BPB lives at sector 0.)
+    firstFATSector  += partStart;
+    firstDataSector += partStart;
 
     return OK;
 }
@@ -825,6 +851,7 @@ Result format()
 
     uint16_t reservedSec = 32;   // FAT32: enough for BPB, FSInfo, backup
     uint8_t  fatCount    = 2;
+    uint32_t partStart   = reservedSec;  // partition LBA start written to the MBR
 
     // Compute FAT size (FAT32: 4 bytes per cluster)
     uint32_t dataArea     = totalSectors - reservedSec;
@@ -841,10 +868,10 @@ Result format()
     part[4] = 0x0C;    // FAT32 LBA partition type
     part[5] = 0xFE; part[6] = 0xFF; part[7] = 0xFF;
     // LBA start = reservedSec (after MBR, before BPB area)
-    part[8]  = (uint8_t)(reservedSec);
-    part[9]  = (uint8_t)(reservedSec >> 8);
-    part[10] = (uint8_t)(reservedSec >> 16);
-    part[11] = (uint8_t)(reservedSec >> 24);
+    part[8]  = (uint8_t)(partStart);
+    part[9]  = (uint8_t)(partStart >> 8);
+    part[10] = (uint8_t)(partStart >> 16);
+    part[11] = (uint8_t)(partStart >> 24);
     // LBA size
     uint32_t partSize = totalSectors - reservedSec;
     part[12] = (uint8_t)(partSize);
@@ -920,7 +947,9 @@ Result format()
     if (!dev->writeBlock(1, sectorBuf)) return DISK_ERR;
 
     // Initialize FAT tables
-    uint32_t fatStart = reservedSec;
+    // FAT area is at partition-relative reservedSec, i.e. absolute
+    // partStart + reservedSec (partStart == reservedSec here).
+    uint32_t fatStart = partStart + reservedSec;
     // First FAT sector: cluster 0 and 1
     memset(sectorBuf, 0, 512);
     sectorBuf[0] = 0xF8; sectorBuf[1] = 0xFF; sectorBuf[2] = 0xFF; sectorBuf[3] = 0x0F;  // cluster 0
@@ -954,6 +983,38 @@ Result format()
     }
 
     return OK;
+}
+
+// --- Temporary debug diagnostics (remove before release) ---
+
+DiagInfo getDiag()
+{
+    DiagInfo d;
+    memset(&d, 0, sizeof(d));
+    d.partStart         = partStart;
+    d.firstFATSector    = firstFATSector;
+    d.firstDataSector   = firstDataSector;
+    d.rootDirCluster    = (fatType == 32) ? rootDirCluster : 0;
+    d.sectorsPerCluster = sectorsPerCluster;
+    d.fatType           = (uint8_t)fatType;
+    d.totalBlocks       = dev ? dev->blockCount() : 0;
+
+    // Probe reads at increasing LBAs to find where reads start failing.
+    static const uint32_t probes[8] = {0, 1, 2048, 4096, 8192, 9600, 16384, 65535};
+    for (uint8_t i = 0; i < 8; i++) {
+        if (dev && dev->readBlock(probes[i], sectorBuf))
+            d.probeMask |= (1 << i);
+    }
+
+    // Raw CMD17 result at the root directory sector.
+    uint32_t rootSec = 0;
+    if (fatType == 32) {
+        rootSec = clustToSector(rootDirCluster);
+    } else {
+        rootSec = firstFATSector + numFATs * sectorsPerFAT;
+    }
+    sd::probeReadCmd(rootSec, &d.rootR1, &d.rootToken);
+    return d;
 }
 
 } // namespace fat

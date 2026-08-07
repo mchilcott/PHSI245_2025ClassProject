@@ -636,4 +636,35 @@ void drawMenu(int16_t x, int16_t y, const char *items[], uint8_t count,
     cursorY = prevY;
 }
 
+uint8_t clampScroll(uint8_t cursor, uint8_t count, uint8_t visible)
+{
+    if (count <= visible)
+        return 0;
+    uint8_t maxScroll = count - visible;
+    uint8_t s = (cursor >= visible) ? (cursor - visible + 1) : 0;
+    return (s > maxScroll) ? maxScroll : s;
+}
+
+void drawScrollMenu(int16_t x, int16_t y, const char *items[], uint8_t count,
+                    uint8_t cursor, uint8_t visible, uint8_t *scroll,
+                    uint8_t lineH)
+{
+    if (count == 0)
+        return;
+    uint8_t s = clampScroll(cursor, count, visible);
+    if (scroll)
+        *scroll = s;
+    int16_t prevX = cursorX, prevY = cursorY;
+    for (uint8_t i = 0; i < visible && (s + i) < count; i++) {
+        int16_t lineY = y + i * lineH;
+        setCursor(x, lineY);
+        if (s + i == cursor)
+            print(">");
+        setCursor(x + 8, lineY);
+        print(items[s + i]);
+    }
+    cursorX = prevX;
+    cursorY = prevY;
+}
+
 } // namespace gfx

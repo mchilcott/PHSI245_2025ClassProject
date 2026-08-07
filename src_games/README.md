@@ -13,6 +13,14 @@ make build-game GAME=OSDemo
 make build-game GAME=HelloNOISE
 ```
 
+The `build-game` target overrides `src_dir` via the `PLATFORMIO_SRC_DIR`
+environment variable, so `platformio.ini` is never modified. The game is
+linked for the app region (`0x8000`+, max 30464 bytes) and wrapped with a
+20-byte `PH25` header + CRC-32 (`prog_tools/mkapp.py`) into
+`build/games/<GAME>.bin`, so a later bootloader build (which overwrites
+`.pio/build/v2/firmware.bin`) can't clobber it. Copy that file to the SD card
+and run it with **A** in the bootloader browser.
+
 The default `make build` target builds the bootloader (`src/`).
 
 You can also manually edit `platformio.ini` and set `src_dir`:
@@ -20,6 +28,12 @@ You can also manually edit `platformio.ini` and set `src_dir`:
 ```ini
 [platformio]
 src_dir = src_games/HelloNOISE
+```
+
+or set the same variable on the command line:
+
+```bash
+PLATFORMIO_SRC_DIR=src_games/HelloNOISE pio run -e v2
 ```
 
 Remove or comment out the `src_dir` line to go back to using the default

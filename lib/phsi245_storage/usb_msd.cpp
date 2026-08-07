@@ -1,5 +1,7 @@
 // USB Mass Storage Device — exposes SD card to host via USB
-// Targets CH32X035 USBFS peripheral (similar to STM32F103 USB)
+// Targets CH32X035 USBFS peripheral (device mode).
+// Register bit definitions mirror the WCH ch32x035_usb.h header, which the
+// Arduino framework build does not ship.
 
 #include "usb_msd.h"
 #include "storage.h"
@@ -7,36 +9,69 @@
 #include <Arduino.h>
 #include <string.h>
 
-// --- Packet buffer layout ---
-// CH32X035 USBFS has a 1KB dedicated packet buffer in SRAM.
-// Buffer descriptor table occupies first 64 bytes (8 endpoints × 8 bytes).
-// Data buffers follow.
+// --- USBFS register bits (CH32X035 device mode) ---
 
-#define USB_PBUF_BASE  0x20000400
-#define USB_BTABLE      ((volatile uint32_t *)USB_PBUF_BASE)
-#define USB_PBUF_DATA   (USB_PBUF_BASE + 64)
+#define USBFS_UC_RESET_SIE    0x04
+#define USBFS_UC_CLR_ALL      0x02
+#define USBFS_UC_DEV_PU_EN    0x20
+#define USBFS_UC_INT_BUSY     0x08
+#define USBFS_UC_DMA_EN       0x01
 
-// Buffer descriptor table offsets (16-bit half-words from pbuf base)
-#define BTABLE_TX_ADDR(ep)  (USB_BTABLE[(ep) * 4 + 0])
-#define BTABLE_TX_COUNT(ep) (USB_BTABLE[(ep) * 4 + 1])
-#define BTABLE_RX_ADDR(ep)  (USB_BTABLE[(ep) * 4 + 2])
-#define BTABLE_RX_COUNT(ep) (USB_BTABLE[(ep) * 4 + 3])
+#define USBFS_UIE_SUSPEND     0x04
+#define USBFS_UIE_TRANSFER    0x02
+#define USBFS_UIE_BUS_RST     0x01
+
+#define USBFS_UIF_SUSPEND     0x04
+#define USBFS_UIF_TRANSFER    0x02
+#define USBFS_UIF_BUS_RST     0x01
+
+#define USBFS_UIS_TOKEN_MASK  0x30
+#define USBFS_UIS_TOKEN_OUT   0x00
+#define USBFS_UIS_TOKEN_SOF   0x10
+#define USBFS_UIS_TOKEN_IN    0x20
+#define USBFS_UIS_TOKEN_SETUP 0x30
+#define USBFS_UIS_ENDP_MASK   0x0F
+
+#define USBFS_UD_PD_DIS       0x80
+#define USBFS_UD_PORT_EN      0x01
+
+#define USBFS_UEP_T_RES_MASK  (3 << 0)
+#define USBFS_UEP_T_RES_ACK   (0 << 1)
+#define USBFS_UEP_T_RES_NAK   (1 << 1)
+#define USBFS_UEP_T_RES_STALL (3 << 0)
+#define USBFS_UEP_T_TOG       (1 << 6)
+#define USBFS_UEP_T_AUTO_TOG  (1 << 4)
+
+#define USBFS_UEP_R_RES_MASK  (3 << 2)
+#define USBFS_UEP_R_RES_ACK   (0 << 3)
+#define USBFS_UEP_R_RES_NAK   (1 << 3)
+#define USBFS_UEP_R_RES_STALL (3 << 2)
+#define USBFS_UEP_R_TOG       (1 << 7)
+#define USBFS_UEP_R_AUTO_TOG  (1 << 4)
+
+#define USBFS_UIS_TOG_OK      0x40
+
+#define USBFS_UEP1_TX_EN      0x40
+#define USBFS_UEP2_RX_EN      0x08
+
+// AFIO->CTLR USB config bits (PC16=UDM/D-, PC17=UDP/D+)
+// UDP_PUE is a 2-bit field [3:2]: 00=disable, 01=35uA, 10=10k, 11=1k5.
+// USB device attach needs the 1.5k D+ pull-up (0x0C), not the 35uA
+// option (0x04) which leaves D+ effectively floating (no enumeration).
+#define AFIO_USB_MASK         0x0F   // UDM_PUE [1:0] | UDP_PUE [3:2]
+#define AFIO_USB_IOEN         0x80
+#define AFIO_USB_PHY_V33      0x40
+#define AFIO_UDP_PUE_1K5      0x0C
 
 // Endpoint assignments
 #define EP0     0   // Control
-#define EP1_IN  1   // Bulk IN (device → host)
-#define EP2_OUT 2   // Bulk OUT (host → device)
-
-// Packet buffer offsets for each endpoint
-#define EP0_TX_OFF  0
-#define EP0_RX_OFF  64
-#define EP1_TX_OFF  128
-#define EP2_RX_OFF  192
+#define EP1_IN  1   // Bulk IN (device -> host)
+#define EP2_OUT 2   // Bulk OUT (host -> device)
 
 // Max packet sizes
 #define EP0_SIZE    64
-#define EP1_SIZE    64  // Bulk IN
-#define EP2_SIZE    64  // Bulk OUT
+#define EP1_SIZE    64
+#define EP2_SIZE    64
 
 // --- USB standard request codes ---
 #define REQ_GET_DESCRIPTOR      0x06
@@ -46,6 +81,8 @@
 #define REQ_GET_STATUS          0x00
 #define REQ_SET_FEATURE         0x03
 #define REQ_CLEAR_FEATURE       0x01
+#define REQ_GET_INTERFACE       0x0A
+#define REQ_SET_INTERFACE       0x0B
 
 #define DESC_DEVICE             0x01
 #define DESC_CONFIG             0x02
@@ -56,8 +93,9 @@
 #define BOT_CSW_SIGNATURE   0x53425355  // "USBS"
 #define BOT_CBW_LEN         31
 #define BOT_CSW_LEN         13
+#define BOT_GET_MAX_LUN     0xFE
+#define BOT_RESET           0xFF
 #define BOT_DIR_IN          0x80
-#define BOT_DIR_OUT         0x00
 
 // --- SCSI commands ---
 #define SCSI_TEST_UNIT_READY    0x00
@@ -69,16 +107,19 @@
 #define SCSI_READ_CAPACITY_10   0x25
 #define SCSI_READ_10            0x28
 #define SCSI_WRITE_10           0x2A
+#define SCSI_SYNCHRONIZE_CACHE  0x35
 
 // --- Global state ---
-static uint8_t  usbAddr       = 0;
-static uint8_t  usbConfigured = 0;
-static bool     hostPresent   = false;
+static uint8_t  usbAddrPending = 0;
+static uint8_t  usbConfigured  = 0;
+static bool     hostPresent    = false;
+static bool     usbInitialized = false;
+static volatile uint32_t usbIsrFires = 0;
 
 // MSD state
-static uint8_t  msdBuf[512];        // shared sector buffer
-static uint32_t msdBlockCount  = 0;
-static uint16_t msdBlockSize   = 512;
+static uint8_t  msdBuf[2][512];      // double-buffered sectors (read path)
+static uint32_t msdBlockCount = 0;
+static uint16_t msdBlockSize  = 512;
 
 // CBW/CSW
 static struct {
@@ -102,7 +143,7 @@ static struct {
 static uint8_t senseKey = 0;
 static uint8_t senseASC = 0;
 
-// --- USB Descriptors ---
+// --- USB descriptors (PROGMEM is empty on RISC-V; plain const) ---
 
 static const PROGMEM uint8_t devDesc[] = {
     0x12,       // bLength
@@ -182,279 +223,343 @@ static const PROGMEM uint8_t *strDescs[] = {
     langID, strManufacturer, strProduct, strSerial
 };
 
-// --- Packet buffer helpers ---
+// --- Endpoint buffers (DMA targets, 4-byte aligned) ---
 
-static void pbuf_write(uint16_t offset, const void *data, uint16_t len)
+__attribute__((aligned(4))) static uint8_t ep0Buf[EP0_SIZE];  // EP0 RX + TX
+__attribute__((aligned(4))) static uint8_t ep1Buf[EP1_SIZE];  // EP1 IN
+__attribute__((aligned(4))) static uint8_t ep2Buf[EP2_SIZE];  // EP2 OUT
+
+// --- Control transfer state ---
+static const uint8_t *ctrlDesc  = 0;
+static uint16_t       ctrlRemain = 0;
+
+// --- BOT state ---
+enum BotState {
+    BOT_IDLE,
+    BOT_DATA_OUT,      // receiving write data from host
+    BOT_DATA_IN,       // sending read data to host
+    BOT_CSW,           // CSW queued/sent
+};
+
+static volatile BotState botState = BOT_IDLE;
+static volatile bool     cbwReady = false;
+static volatile uint8_t  cbwPos   = 0;
+static uint8_t           cbwBuf[32];
+
+// Read (data-in) state — chunks/CSW pumped from ISR, SD refills from loop()
+static uint32_t           txLBA;
+static volatile uint32_t  txRemain;   // bytes the host still expects
+static volatile uint16_t  txBufPos;   // offset within current sector
+static volatile bool txNext  = false;
+static volatile bool ep1Busy = false;
+
+// Double-buffered read path: the ISR drains txDrainIdx while the loop reads
+// the next sector into the other buffer (txPendIdx) and flags it txPendFull,
+// hiding the ~350us card read behind the host's IN-token pacing.
+static volatile uint8_t  txDrainIdx = 0;     // buffer currently drained by ISR
+static volatile uint8_t  txPendIdx  = 0;     // loop-filled buffer awaiting handoff
+static volatile bool     txPendFull = false; // true while txPendIdx holds a sector
+static volatile bool     txWaitPend = false; // ISR needs a new sector — loop arms EP1
+static uint32_t          txSectorsLeft;      // sectors not yet pulled this transfer
+
+// Multi-block read (CMD18) state for the current READ_10 data-in phase.
+static bool     multiReadActive = false;  // CMD18 stream in progress
+
+// --- Diagnostic tracking (temporary) ---
+static uint8_t  dbgLastOp  = 0xFF;
+static uint32_t dbgLastLba = 0;
+static uint16_t dbgSdFails = 0;
+static uint16_t dbgWriteFails = 0;
+// Persistent USB-level counters (survive BOT resets, cleared on init()).
+static volatile uint32_t dbgBusResets = 0;   // host bus resets seen
+static volatile uint32_t dbgCbwCount  = 0;   // CBWs received & processed
+static volatile uint32_t dbgTogFails  = 0;   // EP2 OUT toggle mismatches (dropped pkts)
+static volatile uint32_t dbgInPkts    = 0;   // EP1 IN packets sent (data+CSW)
+static volatile uint32_t dbgTogByState[4] = {0,0,0,0};  // mismatches per BOT state
+// Per-packet gap timing: time between consecutive EP1 data completions, to
+// distinguish device-side NAK bubbles from the host's full-speed polling rate.
+static volatile uint32_t dbgLastDataT = 0;   // micros() of last data completion
+static volatile uint32_t dbgMaxGap    = 0;   // max inter-data-packet gap (us)
+static volatile uint32_t dbgBigGaps   = 0;   // data-packet gaps > 200us
+static uint32_t dbgBusyMs   = 0;   // total ms in a BOT transfer (loop-side)
+static uint32_t dbgReadCmds = 0;   // READ_10 CBWs processed
+
+// Write (data-out) state — ISR fills, loop writes to SD.
+// Triple buffered: the fill slot is (writeHead + writeCount) % 3, which is
+// never one of the full buffers pending write even when a packet straddles a
+// 512-byte sector boundary (with 2 buffers the wrap back onto writeHead
+// corrupted the sector being written out, causing file corruption over MSD).
+static uint8_t          writeBufs[3][512];
+static volatile uint16_t writeFill   = 0;   // bytes in the buffer being filled
+static uint8_t           writeHead   = 0;   // FIFO head: oldest full buffer
+static volatile uint8_t  writeCount  = 0;   // full buffers pending write (0..2)
+static volatile uint32_t rxTotal     = 0;   // bytes received this transfer
+static uint32_t          writeLBA;
+static uint32_t          writeRemain;       // dCBWDataTransferLength
+static bool              writeDiscard;      // true if LBA range invalid (drain only)
+
+// --- Endpoint helpers ---
+
+static void configureBulkEndpoints()
 {
-    volatile uint8_t *p = (volatile uint8_t *)(USB_PBUF_BASE + offset);
-    const uint8_t *src = (const uint8_t *)data;
-    while (len--) *p++ = *src++;
+    USBFSD->UEP4_1_MOD = USBFS_UEP1_TX_EN;   // EP1 IN
+    USBFSD->UEP2_3_MOD = USBFS_UEP2_RX_EN;   // EP2 OUT
+    USBFSD->UEP1_DMA   = (uint32_t)(uint8_t *)ep1Buf;
+    USBFSD->UEP2_DMA   = (uint32_t)(uint8_t *)ep2Buf;
+    // AUTO_TOG: the hardware maintains the data toggle (continuous with the
+    // host's toggle); manual toggling here drifts out of sync across BOT
+    // transfers and made writes fail with host-side USB resets.
+    USBFSD->UEP1_CTRL_H = USBFS_UEP_T_RES_NAK | USBFS_UEP_T_AUTO_TOG;
+    USBFSD->UEP1_TX_LEN = 0;
+    USBFSD->UEP2_CTRL_H = USBFS_UEP_R_RES_ACK | USBFS_UEP_R_AUTO_TOG;
+    ep1Busy     = false;
 }
 
-static void pbuf_read(uint16_t offset, void *data, uint16_t len)
+static void usbEndpInit()
 {
-    volatile uint8_t *p = (volatile uint8_t *)(USB_PBUF_BASE + offset);
-    uint8_t *dst = (uint8_t *)data;
-    while (len--) *dst++ = *p++;
+    USBFSD->UEP0_DMA     = (uint32_t)(uint8_t *)ep0Buf;
+    USBFSD->UEP0_CTRL_H  = USBFS_UEP_R_RES_ACK | USBFS_UEP_T_RES_NAK;  // await SETUP
+    configureBulkEndpoints();
 }
 
-// --- USB endpoint setup ---
-
-static void epSetTxAddr(uint8_t ep, uint16_t offset)
-{
-    BTABLE_TX_ADDR(ep) = offset;
-}
-
-static void epSetRxAddr(uint8_t ep, uint16_t offset)
-{
-    BTABLE_RX_ADDR(ep) = offset;
-}
-
-static void epSetTxCount(uint8_t ep, uint16_t len)
-{
-    BTABLE_TX_COUNT(ep) = len;
-}
-
-static void epSetRxCount(uint8_t ep, uint16_t len)
-{
-    // Bit 15 enables the endpoint, bits 9:0 are the count
-    uint16_t val = len;
-    if (len > 0) val |= 0x8000;  // enable + block size
-    else val = 0x8000;
-    BTABLE_RX_COUNT(ep) = val;
-}
-
-static void epClearCTRx(uint8_t ep)
-{
-    // Clear correct transfer RX flag
-    if (ep == 0)
-        USBFSD->UEP0_CTRL &= ~0x8000;
-    else if (ep == 1)
-        USBFSD->UEP1_CTRL &= ~0x8000;
-    else if (ep == 2)
-        USBFSD->UEP2_CTRL &= ~0x8000;
-    else if (ep == 3)
-        USBFSD->UEP3_CTRL &= ~0x8000;
-}
-
-static void epClearCTTx(uint8_t ep)
-{
-    if (ep == 0)
-        USBFSD->UEP0_CTRL &= ~0x0040;
-    else if (ep == 1)
-        USBFSD->UEP1_CTRL &= ~0x0040;
-    else if (ep == 2)
-        USBFSD->UEP2_CTRL &= ~0x0040;
-    else if (ep == 3)
-        USBFSD->UEP3_CTRL &= ~0x0040;
-}
-
-static void epSetStatus(uint8_t ep, uint16_t stat)
-{
-    volatile uint32_t *ctrl = 0;
-    if (ep == 0) ctrl = &USBFSD->UEP0_CTRL;
-    else if (ep == 1) ctrl = &USBFSD->UEP1_CTRL;
-    else if (ep == 2) ctrl = &USBFSD->UEP2_CTRL;
-    else if (ep == 3) ctrl = &USBFSD->UEP3_CTRL;
-    else return;
-
-    *ctrl = (*ctrl & ~0x0030) | (stat & 0x0030);
-}
-
-static void epToggle(uint8_t ep)
-{
-    volatile uint32_t *ctrl = 0;
-    if (ep == 0) ctrl = &USBFSD->UEP0_CTRL;
-    else if (ep == 1) ctrl = &USBFSD->UEP1_CTRL;
-    else if (ep == 2) ctrl = &USBFSD->UEP2_CTRL;
-    else if (ep == 3) ctrl = &USBFSD->UEP3_CTRL;
-    else return;
-
-    *ctrl ^= 0x0020;
-}
-
-// Send data on EP1 IN (bulk)
+// Queue one packet on EP1 IN. Caller must ensure the endpoint is not busy.
 static void ep1Send(const void *data, uint16_t len)
 {
-    if (len == 0) {
-        epSetTxCount(EP1_IN, 0);
-        return;
-    }
-    pbuf_write(EP1_TX_OFF, data, len);
-    epSetTxCount(EP1_IN, len);
-    epSetStatus(EP1_IN, 0x0010);  // STAT_TX = VALID
+    if (ep1Busy) return;
+    if (len > EP1_SIZE) len = EP1_SIZE;
+    memcpy(ep1Buf, data, len);
+    USBFSD->UEP1_TX_LEN   = len;
+    USBFSD->UEP1_CTRL_H   = (USBFSD->UEP1_CTRL_H & ~USBFS_UEP_T_RES_MASK) | USBFS_UEP_T_RES_ACK;
+    ep1Busy       = true;
 }
 
-// Prepare EP2 OUT for receiving
+// Re-arm EP2 OUT to accept the next packet.
 static void ep2Recv()
 {
-    epSetRxCount(EP2_OUT, EP2_SIZE);
-    epSetStatus(EP2_OUT, 0x0030);  // STAT_RX = VALID
+    USBFSD->UEP2_CTRL_H = (USBFSD->UEP2_CTRL_H & ~USBFS_UEP_R_RES_MASK) | USBFS_UEP_R_RES_ACK;
 }
 
-// --- USB control transfer handling ---
+static void resetBOT()
+{
+    botState     = BOT_IDLE;
+    cbwReady     = false;
+    cbwPos       = 0;
+    txNext       = false;
+    txPendFull   = false;
+    txWaitPend   = false;
+    txSectorsLeft = 0;
+    writeFill    = 0;
+    writeHead    = 0;
+    writeCount   = 0;
+    rxTotal      = 0;
+    if (multiReadActive) {
+        sd::endReadMulti();
+        multiReadActive = false;
+    }
+}
+
+// --- Control transfer handling ---
 
 static void handleSetupPacket()
 {
-    // Read 8-byte setup packet from EP0 RX buffer
     uint8_t setup[8];
-    pbuf_read(EP0_RX_OFF, setup, 8);
+    memcpy(setup, ep0Buf, 8);
 
     uint8_t  bmRequestType = setup[0];
     uint8_t  bRequest      = setup[1];
     uint16_t wValue        = setup[2] | ((uint16_t)setup[3] << 8);
-    uint16_t wIndex        = setup[4] | ((uint16_t)setup[5] << 8);
     uint16_t wLength       = setup[6] | ((uint16_t)setup[7] << 8);
 
-    // Clear CTR after reading setup
-    USBFSD->UEP0_CTRL &= ~0x8000;  // clear RX CTR
-    USBFSD->UEP0_CTRL &= ~0x0040;  // clear TX CTR
+    // NAK both directions; data stage after SETUP is DATA1
+    USBFSD->UEP0_CTRL_H = USBFS_UEP_T_TOG | USBFS_UEP_T_RES_NAK
+                | USBFS_UEP_R_TOG | USBFS_UEP_R_RES_NAK;
 
-    // Set endpoint status for data stage or status stage
-    // Default: STALL if request not handled
-    bool handled = false;
+    bool handled = true;
+    ctrlDesc     = 0;
+    ctrlRemain   = wLength;
 
-    if ((bmRequestType & 0x60) == 0x00) {  // Standard Device request
+    if ((bmRequestType & 0x60) == 0x00) {  // standard request
         switch (bRequest) {
 
         case REQ_SET_ADDRESS:
-            usbAddr = wValue;
-            // Status stage: send zero-length packet
-            epSetTxCount(EP0, 0);
-            epSetStatus(EP0, 0x0010);  // TX valid
-            epSetRxCount(EP0, 0);
-            epSetStatus(EP0, 0x0030);  // RX valid
-            handled = true;
+            usbAddrPending = wValue & 0x7F;
+            ctrlRemain = 0;
             break;
 
         case REQ_SET_CONFIGURATION:
             usbConfigured = wValue;
-            if (usbConfigured) {
-                // Configure endpoints
-                USBFSD->UEP4_1_MOD = 0x80;  // EP1 TX (IN)
-                USBFSD->UEP2_3_MOD = 0x00;  // EP2 RX (OUT)
-                epSetTxAddr(EP1_IN, EP1_TX_OFF);
-                epSetRxAddr(EP2_OUT, EP2_RX_OFF);
-                epSetTxCount(EP1_IN, 0);
-                epSetStatus(EP1_IN, 0x0000);  // NAK initially
-                epSetStatus(EP2_OUT, 0x0000); // NAK initially
-            }
-            // Status stage
-            epSetTxCount(EP0, 0);
-            epSetStatus(EP0, 0x0010);
-            epSetRxCount(EP0, 0);
-            epSetStatus(EP0, 0x0030);
-            handled = true;
+            if (usbConfigured)
+                configureBulkEndpoints();
+            ctrlRemain = 0;
             break;
 
         case REQ_GET_CONFIGURATION:
-            {
-                uint8_t cfg = usbConfigured ? 1 : 0;
-                pbuf_write(EP0_TX_OFF, &cfg, 1);
-                epSetTxCount(EP0, 1);
-                epSetStatus(EP0, 0x0010);  // TX valid
-                epSetRxCount(EP0, 0);
-                epSetStatus(EP0, 0x0030);  // RX valid
-                handled = true;
-            }
+            ep0Buf[0] = usbConfigured ? 1 : 0;
+            ctrlDesc = ep0Buf;
+            if (ctrlRemain > 1) ctrlRemain = 1;
             break;
 
         case REQ_GET_STATUS:
-            {
-                uint16_t status = 0;  // self-powered = 1, remote wakeup = 0
-                if (wLength > 2) wLength = 2;
-                pbuf_write(EP0_TX_OFF, &status, wLength);
-                epSetTxCount(EP0, wLength);
-                epSetStatus(EP0, 0x0010);
-                epSetRxCount(EP0, 0);
-                epSetStatus(EP0, 0x0030);
-                handled = true;
-            }
+            ep0Buf[0] = 0;  // self-powered, remote wakeup off
+            ep0Buf[1] = 0;
+            ctrlDesc = ep0Buf;
+            if (ctrlRemain > 2) ctrlRemain = 2;
             break;
 
         case REQ_CLEAR_FEATURE:
         case REQ_SET_FEATURE:
-            // No features to set/clear — accept
-            epSetTxCount(EP0, 0);
-            epSetStatus(EP0, 0x0010);
-            epSetRxCount(EP0, 0);
-            epSetStatus(EP0, 0x0030);
-            handled = true;
+        case REQ_SET_INTERFACE:
+            ctrlRemain = 0;
             break;
-        }
-    }
 
-    if ((bmRequestType & 0x60) == 0x80) {  // Standard Device → Host
-        if (bRequest == REQ_GET_DESCRIPTOR) {
+        case REQ_GET_INTERFACE:
+            ep0Buf[0] = 0;
+            ctrlDesc = ep0Buf;
+            ctrlRemain = 1;
+            break;
+
+        case REQ_GET_DESCRIPTOR: {
             uint8_t descType = wValue >> 8;
             uint8_t descIdx  = wValue & 0xFF;
-
-            if (descType == DESC_DEVICE) {
-                if (wLength > sizeof(devDesc)) wLength = sizeof(devDesc);
-                pbuf_write(EP0_TX_OFF, devDesc, wLength);
-                epSetTxCount(EP0, wLength);
-                epSetStatus(EP0, 0x0010);
-                epSetRxCount(EP0, 0);
-                epSetStatus(EP0, 0x0030);
-                handled = true;
-            } else if (descType == DESC_CONFIG) {
-                if (wLength > sizeof(cfgDesc)) wLength = sizeof(cfgDesc);
-                pbuf_write(EP0_TX_OFF, cfgDesc, wLength);
-                epSetTxCount(EP0, wLength);
-                epSetStatus(EP0, 0x0010);
-                epSetRxCount(EP0, 0);
-                epSetStatus(EP0, 0x0030);
-                handled = true;
-            } else if (descType == DESC_STRING && descIdx < 4) {
-                const uint8_t *sd = strDescs[descIdx];
-                uint8_t len = pgm_read_byte(sd);
-                if (wLength > len) wLength = len;
-                pbuf_write(EP0_TX_OFF, sd, wLength);
-                epSetTxCount(EP0, wLength);
-                epSetStatus(EP0, 0x0010);
-                epSetRxCount(EP0, 0);
-                epSetStatus(EP0, 0x0030);
-                handled = true;
+            switch (descType) {
+            case DESC_DEVICE:
+                ctrlDesc   = devDesc;
+                ctrlRemain = (wLength < sizeof(devDesc)) ? wLength : (uint16_t)sizeof(devDesc);
+                break;
+            case DESC_CONFIG:
+                ctrlDesc   = cfgDesc;
+                ctrlRemain = (wLength < sizeof(cfgDesc)) ? wLength : (uint16_t)sizeof(cfgDesc);
+                break;
+            case DESC_STRING:
+                if (descIdx < 4) {
+                    ctrlDesc   = strDescs[descIdx];
+                    uint8_t len = ctrlDesc[0];
+                    ctrlRemain = (wLength < len) ? wLength : len;
+                } else {
+                    handled = false;
+                }
+                break;
+            default:
+                handled = false;
+                break;
             }
+            break;
         }
+
+        default:
+            handled = false;
+            break;
+        }
+    } else if ((bmRequestType & 0x60) == 0x20) {  // class request
+        if (bRequest == BOT_GET_MAX_LUN) {
+            ep0Buf[0] = 0;      // single LUN
+            ctrlDesc = ep0Buf;
+            ctrlRemain = 1;
+        } else if (bRequest == BOT_RESET) {
+            resetBOT();
+            ctrlRemain = 0;
+        } else {
+            handled = false;
+        }
+    } else {
+        handled = false;
     }
 
     if (!handled) {
-        // STALL
-        epSetStatus(EP0, 0x0020);
-        epSetRxCount(EP0, 0);
-        epSetStatus(EP0, 0x0020);
+        USBFSD->UEP0_CTRL_H = USBFS_UEP_T_TOG | USBFS_UEP_T_RES_STALL
+                    | USBFS_UEP_R_TOG | USBFS_UEP_R_RES_STALL;
+        return;
     }
-}
 
-// --- USB interrupt handler ---
-
-static void handleEP0Out()
-{
-    // EP0 OUT transfer complete (data stage of control write)
-    USBFSD->UEP0_CTRL &= ~0x8000;  // clear RX CTR
+    if (bmRequestType & BOT_DIR_IN) {
+        // IN data stage (device -> host)
+        if (ctrlRemain > 0) {
+            uint16_t n = (ctrlRemain > EP0_SIZE) ? EP0_SIZE : ctrlRemain;
+            memcpy(ep0Buf, ctrlDesc, n);
+            ctrlDesc += n;
+            ctrlRemain -= n;
+            USBFSD->UEP0_TX_LEN = n;
+            USBFSD->UEP0_CTRL_H = (USBFSD->UEP0_CTRL_H & ~USBFS_UEP_T_RES_MASK)
+                        | USBFS_UEP_T_TOG | USBFS_UEP_T_RES_ACK;
+        } else {
+            USBFSD->UEP0_TX_LEN = 0;
+            USBFSD->UEP0_CTRL_H = (USBFSD->UEP0_CTRL_H & ~USBFS_UEP_T_RES_MASK)
+                        | USBFS_UEP_T_TOG | USBFS_UEP_T_RES_ACK;
+        }
+    } else if (ctrlRemain == 0) {
+        // Status stage (zero-length IN)
+        USBFSD->UEP0_TX_LEN = 0;
+        USBFSD->UEP0_CTRL_H = (USBFSD->UEP0_CTRL_H & ~USBFS_UEP_T_RES_MASK)
+                    | USBFS_UEP_T_TOG | USBFS_UEP_T_RES_ACK;
+    } else {
+        // OUT data stage (host -> device) — none expected, arm RX anyway
+        USBFSD->UEP0_CTRL_H = (USBFSD->UEP0_CTRL_H & ~USBFS_UEP_R_RES_MASK)
+                    | USBFS_UEP_R_TOG | USBFS_UEP_R_RES_ACK;
+    }
 }
 
 static void handleEP0In()
 {
-    // EP0 IN transfer complete
-    USBFSD->UEP0_CTRL &= ~0x0040;  // clear TX CTR
+    if (ctrlRemain == 0) {
+        // Data stage complete — arm RX for the status OUT
+        USBFSD->UEP0_CTRL_H = (USBFSD->UEP0_CTRL_H & ~USBFS_UEP_R_RES_MASK)
+                    | USBFS_UEP_R_TOG | USBFS_UEP_R_RES_ACK;
+    }
+    if (usbAddrPending) {
+        USBFSD->DEV_ADDR = (USBFSD->DEV_ADDR & 0x80) | usbAddrPending;
+        usbAddrPending = 0;
+    }
+    if (ctrlRemain > 0 && ctrlDesc != 0) {
+        uint16_t n = (ctrlRemain > EP0_SIZE) ? EP0_SIZE : ctrlRemain;
+        memcpy(ep0Buf, ctrlDesc, n);
+        ctrlDesc += n;
+        ctrlRemain -= n;
+        USBFSD->UEP0_TX_LEN   = n;
+        USBFSD->UEP0_CTRL_H  ^= USBFS_UEP_T_TOG;
+    }
+}
+
+static void handleEP0Out()
+{
+    (void)(USBFSD->RX_LEN & 0x3FF);  // no control-OUT data accepted
+    if (ctrlRemain == 0) {
+        // Status stage — send zero-length IN
+        USBFSD->UEP0_TX_LEN = 0;
+        USBFSD->UEP0_CTRL_H = (USBFSD->UEP0_CTRL_H & ~USBFS_UEP_T_RES_MASK)
+                    | USBFS_UEP_T_TOG | USBFS_UEP_T_RES_ACK;
+    }
 }
 
 // --- SCSI command processing ---
 
+static void msdFillTx();
+static void sendCSW();
+
 static void scsiTestUnitReady()
 {
-    // Always ready if SD is available
     if (storage::sdAvailable()) {
         senseKey = 0;
-        csw.bCSWStatus = 0;  // command passed
+        csw.bCSWStatus = 0;
     } else {
-        senseKey = 2;  // NOT READY
-        senseASC = 0x3A; // MEDIUM NOT PRESENT
-        csw.bCSWStatus = 1;  // command failed
+        senseKey = 2;       // NOT READY
+        senseASC = 0x3A;    // MEDIUM NOT PRESENT
+        csw.bCSWStatus = 1;
     }
     csw.dCSWDataResidue = 0;
+}
+
+// Start a data-in transfer from a small payload (<=64 bytes, single packet,
+// no SD access). Larger transfers use the SD-backed path in msdFillTx().
+static void startDataIn(const void *data, uint16_t len, uint32_t transferLen)
+{
+    if (len > EP1_SIZE) len = EP1_SIZE;
+    if (transferLen < len) len = (uint16_t)transferLen;
+    txRemain = 0;   // CSW follows once this packet is sent
+    txNext   = false;
+    csw.dCSWDataResidue = transferLen - len;
+    csw.bCSWStatus = 0;
+    botState = BOT_DATA_IN;
+    ep1Send(data, len);
 }
 
 static void scsiRequestSense()
@@ -466,12 +571,9 @@ static void scsiRequestSense()
     sense[7] = 10;      // additional sense length
     sense[12] = senseASC;
 
-    uint8_t len = cbw.CBWCB[4];
+    uint16_t len = cbw.CBWCB[4];
     if (len > 18) len = 18;
-    ep1Send(sense, len);
-    csw.dCSWDataResidue = cbw.dCBWDataTransferLength - len;
-    csw.bCSWStatus = 0;
-
+    startDataIn(sense, len, cbw.dCBWDataTransferLength);
     senseKey = 0;
     senseASC = 0;
 }
@@ -489,19 +591,15 @@ static void scsiInquiry()
     memcpy(inquiry + 16, "SD Card    ", 12);
     memcpy(inquiry + 28, "1.00", 4);
 
-    uint8_t len = cbw.CBWCB[4];
+    uint16_t len = cbw.CBWCB[4];
     if (len > 36) len = 36;
-    ep1Send(inquiry, len);
-    csw.dCSWDataResidue = cbw.dCBWDataTransferLength - len;
-    csw.bCSWStatus = 0;
+    startDataIn(inquiry, len, cbw.dCBWDataTransferLength);
 }
 
 static void scsiModeSense6()
 {
     uint8_t mode[4] = {3, 0, 0, 0};  // mode parameter header
-    ep1Send(mode, 4);
-    csw.dCSWDataResidue = cbw.dCBWDataTransferLength - 4;
-    csw.bCSWStatus = 0;
+    startDataIn(mode, 4, cbw.dCBWDataTransferLength);
 }
 
 static void scsiReadCapacity10()
@@ -519,44 +617,116 @@ static void scsiReadCapacity10()
     cap[6] = (uint8_t)(msdBlockSize >> 8);
     cap[7] = (uint8_t)(msdBlockSize);
 
-    ep1Send(cap, 8);
-    csw.dCSWDataResidue = cbw.dCBWDataTransferLength - 8;
-    csw.bCSWStatus = 0;
+    startDataIn(cap, 8, cbw.dCBWDataTransferLength);
 }
 
-static bool scsiRead10()
+// Read the next sector for the data-in phase. Uses the active CMD18 stream
+// if one is running, otherwise a single CMD17 read. Ends the stream once the
+// last sector of the transfer has been pulled (the data is already in the
+// caller's buffer, so stopping early is safe).
+static bool readTxSector(uint8_t *buf)
+{
+    if (txSectorsLeft == 0) return false;
+    txSectorsLeft--;
+    if (multiReadActive) {
+        bool ok = sd::readMultiBlock(buf);
+        if (ok) txLBA++;
+        if (txSectorsLeft == 0) {
+            sd::endReadMulti();
+            multiReadActive = false;
+        }
+        return ok;
+    }
+    return sd::readBlock(txLBA++, buf);
+}
+
+// Abort a running multi-block stream (error paths).
+static void abortReadMulti()
+{
+    if (multiReadActive) {
+        sd::endReadMulti();
+        multiReadActive = false;
+    }
+}
+
+// Start the next data-in transfer. Loop context only (may do SD I/O):
+// reads the first sector and queues the first chunk. All following chunks
+// and the CSW are pumped from the USB ISR; the loop keeps one full sector
+// read-ahead so the ISR never waits on SD.
+static void msdFillTx()
+{
+    if (botState != BOT_DATA_IN) return;
+
+    if (txRemain == 0) {
+        botState = BOT_CSW;
+        sendCSW();
+        return;
+    }
+
+    if (!readTxSector(msdBuf[0])) {
+        abortReadMulti();
+        dbgSdFails++;
+        csw.bCSWStatus = 1;
+        senseKey = 4;   // HARDWARE ERROR
+        botState = BOT_CSW;
+        sendCSW();
+        return;
+    }
+
+    txDrainIdx = 0;
+    dbgLastDataT = 0;  // sector start — only consecutive same-sector gaps count
+    uint16_t n = (txRemain > 64) ? 64 : (uint16_t)txRemain;
+    ep1Send(msdBuf[0], n);
+    txBufPos = n;
+    txRemain -= n;
+}
+
+static void scsiRead10()
 {
     uint32_t lba = ((uint32_t)cbw.CBWCB[2] << 24) | ((uint32_t)cbw.CBWCB[3] << 16)
                  | ((uint32_t)cbw.CBWCB[4] << 8)  | cbw.CBWCB[5];
     uint16_t count = ((uint16_t)cbw.CBWCB[7] << 8) | cbw.CBWCB[8];
     if (count == 0) count = 256;
+    dbgReadCmds++;
 
     if (lba + count > sd::blockCount()) {
         csw.dCSWDataResidue = cbw.dCBWDataTransferLength;
         csw.bCSWStatus = 1;
-        senseKey = 5;  // ILLEGAL REQUEST
+        senseKey = 5;   // ILLEGAL REQUEST
         senseASC = 0x21; // LBA OUT OF RANGE
-        return false;
+        botState = BOT_CSW;
+        sendCSW();
+        return;
     }
 
-    // Read and send one block per call to avoid hogging the CPU
-    static uint32_t readLBA    = 0;
-    static uint16_t readRemain = 0;
-    readLBA    = lba;
-    readRemain = count;
-    (void)readLBA; (void)readRemain;  // used across calls
+    dbgLastLba = lba;
+    uint32_t want = cbw.dCBWDataTransferLength;
+    uint32_t avail = (uint32_t)count * 512;
+    if (want > avail) want = avail;
 
-    // Read first block and send
-    if (!sd::readBlock(lba, msdBuf)) {
-        csw.dCSWDataResidue = cbw.dCBWDataTransferLength;
-        csw.bCSWStatus = 1;
-        senseKey = 4;  // HARDWARE ERROR
-        return false;
-    }
-    ep1Send(msdBuf, 512);
-    csw.dCSWDataResidue = 0; // handled by caller
+    txLBA    = lba;
+    txRemain = want;
+    txBufPos = 0;
+    txNext   = false;
+    txSectorsLeft = (want + 511) / 512;
+    txPendFull = false;
+    txPendIdx  = 0;
+    txDrainIdx = 0;
+    txWaitPend = false;
+    csw.dCSWDataResidue = cbw.dCBWDataTransferLength - want;
     csw.bCSWStatus = 0;
-    return true;
+    botState = BOT_DATA_IN;
+
+    // Multi-block (CMD18) for transfers of >= 2 full sectors: amortizes the
+    // per-sector select/CMD17/token overhead that dominates mount. Falls back
+    // to single CMD17 reads if the stream can't be started.
+    multiReadActive = false;
+    if (want >= 1024) {
+        if (sd::beginReadMulti(lba) == 0) {
+            multiReadActive = true;
+        }
+    }
+    msdFillTx();
 }
 
 static void scsiWrite10()
@@ -566,32 +736,32 @@ static void scsiWrite10()
     uint16_t count = ((uint16_t)cbw.CBWCB[7] << 8) | cbw.CBWCB[8];
     if (count == 0) count = 256;
 
-    if (lba + count > sd::blockCount()) {
-        csw.dCSWDataResidue = cbw.dCBWDataTransferLength;
+    dbgLastLba = lba;
+    writeLBA    = lba;
+    writeRemain = cbw.dCBWDataTransferLength;
+    writeFill   = 0;
+    writeHead   = 0;
+    writeCount  = 0;
+    rxTotal     = 0;
+    writeDiscard = (lba + count > sd::blockCount());
+
+    if (writeDiscard) {
+        csw.dCSWDataResidue = 0;
         csw.bCSWStatus = 1;
         senseKey = 5;
         senseASC = 0x21;
-        // Need to receive and discard data
-        return;
+    } else {
+        csw.dCSWDataResidue = 0;
+        csw.bCSWStatus = 0;
     }
 
-    // For writes, we expect data on EP2 OUT. The data is in the RX buffer.
-    // Read from EP2 buffer and write to SD.
-    uint16_t rxCount = USBFSD->RX_LEN & 0x3FF;
-    if (rxCount >= 512) rxCount = 512;
-    pbuf_read(EP2_RX_OFF, msdBuf, rxCount);
-
-    ep2Recv();  // prepare for next packet
-
-    if (!sd::writeBlock(lba, msdBuf)) {
-        csw.dCSWDataResidue = cbw.dCBWDataTransferLength;
-        csw.bCSWStatus = 1;
-        senseKey = 4;
-        return;
+    if (writeRemain > 0) {
+        botState = BOT_DATA_OUT;
+        ep2Recv();
+    } else {
+        botState = BOT_CSW;
+        sendCSW();
     }
-
-    csw.dCSWDataResidue = cbw.dCBWDataTransferLength - 512;
-    csw.bCSWStatus = 0;
 }
 
 static void scsiPreventAllow()
@@ -606,304 +776,482 @@ static void scsiStopStart()
     csw.bCSWStatus = 0;
 }
 
+// Process a WRITE_10 CBW from ISR context. scsiWrite10() only assigns state
+// and programs endpoint registers (sd::blockCount() is a cached read), so this
+// is safe to run in the ISR. Setting up the data phase here — instead of
+// leaving cbwReady for the loop — closes the race where the host's first data
+// packet is received and ACKed by the SIE before the loop processes the CBW,
+// then discarded, stalling the write forever waiting for rxTotal == writeRemain.
+static void processWriteCBW()
+{
+    memcpy(&cbw, cbwBuf, BOT_CBW_LEN);
+    dbgCbwCount++;
+    csw.dCSWSignature   = BOT_CSW_SIGNATURE;
+    csw.dCSWTag         = cbw.dCBWTag;
+    csw.dCSWDataResidue = 0;
+    csw.bCSWStatus      = 0;
+    cbwReady            = false;
+    txNext              = false;
+    dbgLastOp           = cbw.CBWCB[0];
+    scsiWrite10();
+}
+
 // --- BOT state machine ---
-enum BotState {
-    BOT_IDLE,
-    BOT_CBW_READY,     // CBW received by ISR, pending processing
-    BOT_DATA_OUT,      // waiting for write data from host
-    BOT_DATA_IN,       // sending read data to host
-    BOT_CSW,           // sending CSW
-};
 
-static volatile BotState botState = BOT_IDLE;
-static uint8_t  cbwBuf[32];
-static volatile uint8_t  cbwPos = 0;
-static volatile bool     cbwReady = false;
-
-// Write state tracking
-static uint32_t writeLBA;
-static uint16_t writeRemain;
-static uint16_t writeBufPos;  // bytes received into msdBuf
+static void sendCSW()
+{
+    dbgLastDataT = 0;  // command boundary — start a fresh gap run
+    botState = BOT_CSW;
+    ep1Send(&csw, BOT_CSW_LEN);
+}
 
 static void processCBW()
 {
     memcpy(&cbw, cbwBuf, BOT_CBW_LEN);
+    dbgCbwCount++;
     csw.dCSWSignature  = BOT_CSW_SIGNATURE;
-    csw.dCSWTag         = cbw.dCBWTag;
+    csw.dCSWTag        = cbw.dCBWTag;
     csw.dCSWDataResidue = 0;
     csw.bCSWStatus      = 0;
+    cbwReady            = false;
+    txNext              = false;
 
     uint8_t op = cbw.CBWCB[0];
+    dbgLastOp = op;
 
     switch (op) {
     case SCSI_TEST_UNIT_READY:
         scsiTestUnitReady();
-        botState = BOT_CSW;
-        cbwReady = false;
+        sendCSW();
         break;
     case SCSI_REQUEST_SENSE:
         scsiRequestSense();
-        botState = BOT_DATA_IN;
-        cbwReady = false;
         break;
     case SCSI_INQUIRY:
         scsiInquiry();
-        botState = BOT_DATA_IN;
-        cbwReady = false;
         break;
     case SCSI_MODE_SENSE_6:
         scsiModeSense6();
-        botState = BOT_DATA_IN;
-        cbwReady = false;
         break;
     case SCSI_READ_CAPACITY_10:
         scsiReadCapacity10();
-        botState = BOT_DATA_IN;
-        cbwReady = false;
         break;
     case SCSI_READ_10:
-        if (scsiRead10())
-            botState = BOT_DATA_IN;
-        else
-            botState = BOT_CSW;
-        cbwReady = false;
+        scsiRead10();
         break;
     case SCSI_WRITE_10:
-        writeLBA = ((uint32_t)cbw.CBWCB[2] << 24) | ((uint32_t)cbw.CBWCB[3] << 16)
-                 | ((uint32_t)cbw.CBWCB[4] << 8)  | cbw.CBWCB[5];
-        writeRemain = ((uint16_t)cbw.CBWCB[7] << 8) | cbw.CBWCB[8];
-        if (writeRemain == 0) writeRemain = 256;
-        writeBufPos = 0;
-        if (cbw.dCBWDataTransferLength > 0) {
-            botState = BOT_DATA_OUT;
-            ep2Recv();  // start receiving write data
-        } else {
-            scsiWrite10();
-            botState = BOT_CSW;
-        }
-        cbwReady = false;
+        scsiWrite10();
         break;
     case SCSI_PREVENT_ALLOW:
         scsiPreventAllow();
-        botState = BOT_CSW;
-        cbwReady = false;
+        sendCSW();
         break;
     case SCSI_START_STOP_UNIT:
         scsiStopStart();
-        botState = BOT_CSW;
-        cbwReady = false;
+        sendCSW();
+        break;
+    case SCSI_SYNCHRONIZE_CACHE:
+        csw.dCSWDataResidue = 0;
+        csw.bCSWStatus = 0;
+        sendCSW();
         break;
     default:
         senseKey = 5;
         senseASC = 0x20;
         csw.bCSWStatus = 1;
         csw.dCSWDataResidue = cbw.dCBWDataTransferLength;
-        botState = BOT_CSW;
-        cbwReady = false;
+        sendCSW();
         break;
     }
-}
-
-static void sendCSW()
-{
-    ep1Send(&csw, BOT_CSW_LEN);
-    botState = BOT_IDLE;
 }
 
 // --- Public API ---
 
 void usb_msd::init()
 {
-    // Enable USB clock
+    // Clocks
     RCC->AHBPCENR |= RCC_USBFS;
+    RCC->APB2PCENR |= RCC_APB2Periph_AFIO | RCC_APB2Periph_GPIOC;
 
-    // Configure USB pins PC16 (UDM/D-), PC17 (UDP/D+)
-    RCC->APB2PCENR |= RCC_APB2Periph_GPIOC;
-
+    // GPIO: PC16 (UDM/D-) floating, PC17 (UDP/D+) pull-up
     GPIO_InitTypeDef g = {0};
-    g.GPIO_Pin = GPIO_Pin_16 | GPIO_Pin_17;
-
-    // Actually, PC16 and PC17 need special USB peripheral mode.
-    // Set as alternate function push-pull with proper USB AF mode.
-    // On CH32X035, the USB pins are automatically routed when USBFS is enabled.
-    g.GPIO_Mode = GPIO_Mode_IN_FLOATING;  // USB PHY handles pin direction
-    g.GPIO_Speed = GPIO_Speed_50MHz;
+    g.GPIO_Pin   = GPIO_Pin_16;
+    g.GPIO_Mode  = GPIO_Mode_IN_FLOATING;
+    GPIO_Init(GPIOC, &g);
+    g.GPIO_Pin   = GPIO_Pin_17;
+    g.GPIO_Mode  = GPIO_Mode_IPU;
     GPIO_Init(GPIOC, &g);
 
-    // Reset USB peripheral
+    // AFIO: route USB IO, enable D+ 1.5K pull-up (device attach), PHY at 3.3V
+    AFIO->CTLR = (AFIO->CTLR & ~AFIO_USB_MASK)
+               | AFIO_USB_PHY_V33 | AFIO_UDP_PUE_1K5 | AFIO_USB_IOEN;
+
+    // SIE
     USBFSD->BASE_CTRL = 0;
-    for (volatile int i = 0; i < 200; i++) __asm__("nop");
-    USBFSD->BASE_CTRL = 0x04;  // USB enable (bit 2 = USBEN)
+    usbEndpInit();
+    USBFSD->DEV_ADDR  = 0;
+    USBFSD->BASE_CTRL = USBFS_UC_DEV_PU_EN | USBFS_UC_INT_BUSY | USBFS_UC_DMA_EN;
 
-    // Clear all interrupts
-    USBFSD->INT_FG = 0xFF;
-
-    // Enable interrupts: reset, suspend, CTR (correct transfer)
-    USBFSD->INT_EN = (1 << 6) | (1 << 5) | (1 << 4) | (1 << 0);
-
-    // Set up buffer descriptor table
-    // Endpoint 0: TX at offset 0, RX at offset 64
-    epSetTxAddr(EP0, EP0_TX_OFF);
-    epSetRxAddr(EP0, EP0_RX_OFF);
-    epSetRxCount(EP0, EP0_SIZE);  // enable RX
-    epSetStatus(EP0, 0x0030);     // RX valid
-
-    // Set device address to 0 initially
-    USBFSD->DEV_ADDR = 0;
-
-    // Enable USB pull-up on D+ (UDEV_CTRL bit 0 = PDEN)
-    USBFSD->UDEV_CTRL = 0x01;
-
-    // Enable USBFS interrupt
+    USBFSD->INT_FG   = 0xFF;
+    USBFSD->UDEV_CTRL = USBFS_UD_PD_DIS | USBFS_UD_PORT_EN;
+    USBFSD->INT_EN   = USBFS_UIE_SUSPEND | USBFS_UIE_BUS_RST | USBFS_UIE_TRANSFER;
     NVIC_EnableIRQ(USBFS_IRQn);
 
-    // Initialize MSD
-    msdBlockSize = 512;
-    if (storage::sdAvailable())
-        msdBlockCount = sd::blockCount();
-    else
-        msdBlockCount = 0;
+    usbInitialized = true;
+    hostPresent    = false;
+    usbAddrPending = 0;
+    usbConfigured  = 0;
+    resetBOT();
 
-    botState = BOT_IDLE;
-    cbwPos = 0;
+    msdBlockSize  = 512;
+    msdBlockCount = storage::sdAvailable() ? sd::blockCount() : 0;
+}
+
+void usb_msd::deinit()
+{
+    NVIC_DisableIRQ(USBFS_IRQn);
+
+    // Disconnect: release D+ pull-up and USB IO, pull the SIE out of operation
+    AFIO->CTLR &= ~(AFIO_USB_MASK | AFIO_USB_IOEN);
+    USBFSD->BASE_CTRL = USBFS_UC_RESET_SIE | USBFS_UC_CLR_ALL;
+    delay(10);
+    USBFSD->BASE_CTRL = 0;
+
+    hostPresent    = false;
+    usbInitialized = false;
+    resetBOT();
+}
+
+void usb_msd::linkAnchor()
+{
+    // Keep this library linked via os_libs_init() (AGENTS.md convention).
 }
 
 bool usb_msd::isConnected()
 {
-    // Check if USB reset has been received (host is present)
     return hostPresent;
 }
 
-static bool dataProcessed = false;
+uint32_t usb_msd::isrCount()
+{
+    return usbIsrFires;
+}
+
+bool usb_msd::isBusy()
+{
+    return cbwReady || botState == BOT_DATA_IN || botState == BOT_DATA_OUT;
+}
+
+// --- Temporary BOT diagnostics ---
+uint8_t usb_msd::botStateDebug()
+{
+    return (uint8_t)botState;
+}
+
+uint16_t usb_msd::txRemainDebug()
+{
+    return txRemain;
+}
+
+uint8_t usb_msd::lastOpcode()
+{
+    return dbgLastOp;
+}
+
+uint32_t usb_msd::lastLBA()
+{
+    return dbgLastLba;
+}
+
+uint16_t usb_msd::sdFailCount()
+{
+    return dbgSdFails;
+}
+
+uint16_t usb_msd::writeFailCount()
+{
+    return dbgWriteFails;
+}
+
+uint32_t usb_msd::busResetCount()
+{
+    return dbgBusResets;
+}
+
+uint32_t usb_msd::cbwCount()
+{
+    return dbgCbwCount;
+}
+
+uint32_t usb_msd::togFailCount()
+{
+    return dbgTogFails;
+}
+
+uint16_t usb_msd::togByState(uint8_t state)
+{
+    if (state > 3) return 0;
+    return dbgTogByState[state];
+}
+
+uint32_t usb_msd::inPktCount()
+{
+    return dbgInPkts;
+}
+
+uint32_t usb_msd::busyMs()
+{
+    return dbgBusyMs;
+}
+
+uint32_t usb_msd::readCmdCount()
+{
+    return dbgReadCmds;
+}
+
+uint32_t usb_msd::maxInGap()
+{
+    return dbgMaxGap;
+}
+
+uint32_t usb_msd::bigGapCount()
+{
+    return dbgBigGaps;
+}
 
 bool usb_msd::update()
 {
+    if (!usbInitialized) return false;
+
+    // Accumulate wall-clock time spent inside BOT transfers. The loop runs
+    // without its idle delay while busy, so the inter-update delta here is
+    // real transfer time (incl. SD reads and waiting on the host's IN tokens).
+    static uint32_t lastMs = 0;
+    uint32_t now = millis();
+    uint32_t delta = (lastMs != 0) ? now - lastMs : 0;
+    lastMs = now;
+    if (cbwReady || botState == BOT_DATA_IN || botState == BOT_DATA_OUT)
+        dbgBusyMs += delta;
+
     if (cbwReady) {
         processCBW();
         return true;
     }
-    return false;
+
+    if (botState == BOT_DATA_IN && txRemain > 0) {
+        if (!txPendFull && txSectorsLeft > 0) {
+            uint8_t freeIdx = txDrainIdx ^ 1;
+            if (!readTxSector(msdBuf[freeIdx])) {
+                abortReadMulti();
+                dbgSdFails++;
+                csw.bCSWStatus = 1;
+                senseKey = 4;   // HARDWARE ERROR
+                botState = BOT_CSW;
+                sendCSW();
+                return true;
+            }
+            txPendIdx  = freeIdx;
+            txPendFull = true;
+        }
+        if (txWaitPend && txPendFull) {
+            txWaitPend = false;
+            txPendFull = false;
+            txDrainIdx = txPendIdx;
+            dbgLastDataT = 0;  // sector start — fresh gap run
+            uint16_t n = (txRemain > 64) ? 64 : (uint16_t)txRemain;
+            ep1Send(msdBuf[txDrainIdx], n);
+            txBufPos = n;
+            txRemain -= n;
+        }
+    } else if (botState == BOT_DATA_OUT) {
+        // Write all pending full sectors to the SD card (up to two).
+        while (writeCount > 0) {
+            bool ok = true;
+            if (!writeDiscard)
+                ok = sd::writeBlock(writeLBA, writeBufs[writeHead]);
+            if (!ok) dbgWriteFails++;
+            writeLBA++;
+            writeHead = (uint8_t)((writeHead + 1) % 3);
+            writeCount--;
+            ep2Recv();  // buffer freed — unthrottle the host
+        }
+        if (rxTotal >= writeRemain && writeFill > 0) {
+            // Final partial sector — zero pad and flush
+            bool ok = true;
+            if (!writeDiscard) {
+                memset(writeBufs[writeHead] + writeFill, 0, 512 - writeFill);
+                ok = sd::writeBlock(writeLBA, writeBufs[writeHead]);
+            }
+            if (!ok) dbgWriteFails++;
+            writeLBA++;
+            writeFill = 0;
+        }
+        if (rxTotal >= writeRemain && writeFill == 0 && writeCount == 0) {
+            botState = BOT_CSW;
+            sendCSW();
+        }
+    }
+    return true;
 }
 
 // --- USB interrupt handler ---
+// MUST be compiled with the WCH-Interrupt-fast attribute: a plain function
+// prologue would return via `ret` to a stale `ra` and never restore mstatus,
+// which dead-locks the first interrupt and hangs the main loop.
+extern "C" void USBFS_IRQHandler(void) __attribute__((interrupt("WCH-Interrupt-fast")));
 extern "C" void USBFS_IRQHandler(void)
 {
-    uint8_t ist = USBFSD->INT_ST;
+    usbIsrFires++;
+    uint8_t intflag = USBFSD->INT_FG;
+    uint8_t intst   = USBFSD->INT_ST;
 
-    // Reset
-    if (ist & 0x10) {
-        USBFSD->INT_FG = 0x10;
-        usbAddr = 0;
-        USBFSD->DEV_ADDR = 0;
-        hostPresent = true;
+    if (intflag & USBFS_UIF_TRANSFER) {
+        switch (intst & USBFS_UIS_TOKEN_MASK) {
 
-        // Re-init buffer table
-        epSetTxAddr(EP0, EP0_TX_OFF);
-        epSetRxAddr(EP0, EP0_RX_OFF);
-        epSetRxCount(EP0, EP0_SIZE);
-        epSetStatus(EP0, 0x0030);
-        epSetTxCount(EP0, 0);
-        botState = BOT_IDLE;
-        cbwPos = 0;
-        epSetStatus(EP1_IN, 0x0000);
-        epSetStatus(EP2_OUT, 0x0000);
-    }
+        case USBFS_UIS_TOKEN_SETUP:
+            handleSetupPacket();
+            break;
 
-    // Suspend / Wakeup
-    if (ist & 0x08) {
-        USBFSD->INT_FG = 0x08;
-    }
-    if (ist & 0x20) {
-        USBFSD->INT_FG = 0x20;
-    }
-
-    // Correct transfer (CTR) — endpoint activity
-    if (ist & 0x80) {
-        uint8_t ep = (USBFSD->INT_ST >> 4) & 0x07;
-
-        // Determine direction
-        uint16_t ctrl;
-        if (ep == 0) ctrl = USBFSD->UEP0_CTRL;
-        else if (ep == 1) ctrl = USBFSD->UEP1_CTRL;
-        else if (ep == 2) ctrl = USBFSD->UEP2_CTRL;
-        else if (ep == 3) ctrl = USBFSD->UEP3_CTRL;
-        else goto ctr_done;
-
-        bool isRx = (ctrl & 0x8000) != 0;  // RX transfer complete
-
-        if (ep == 0) {
-            // Control endpoint
-            if (isRx) {
-                // Check if this is a SETUP packet
-                if (USBFSD->UEP0_CTRL & 0x0800) {  // SETUP flag
-                    handleSetupPacket();
-                } else {
-                    // EP0 OUT data
-                    handleEP0Out();
-                }
-            } else {
-                // EP0 IN complete
+        case USBFS_UIS_TOKEN_IN: {
+            uint8_t ep = intst & USBFS_UIS_ENDP_MASK;
+            if (ep == 0) {
                 handleEP0In();
-                // Apply address if pending
-                if (usbAddr) {
-                    USBFSD->DEV_ADDR = usbAddr;
-                    usbAddr = 0;
+            } else if (ep == EP1_IN) {
+                USBFSD->UEP1_CTRL_H = (USBFSD->UEP1_CTRL_H & ~USBFS_UEP_T_RES_MASK)
+                                    | USBFS_UEP_T_RES_NAK;
+                ep1Busy = false;
+                if (botState == BOT_DATA_IN) {
+                    if (txRemain == 0) {
+                        dbgInPkts++;
+                        sendCSW();              // data phase complete — queue CSW now
+                    } else if (txBufPos != 0) {
+                        dbgInPkts++;
+                        uint32_t nt = micros();
+                        if (dbgLastDataT != 0) {
+                            uint32_t g = nt - dbgLastDataT;
+                            if (g > dbgMaxGap) dbgMaxGap = g;
+                            if (g > 200) dbgBigGaps++;
+                        }
+                        dbgLastDataT = nt;
+                        uint16_t n = (txRemain > 64) ? 64 : (uint16_t)txRemain;
+                        ep1Send(msdBuf[txDrainIdx] + txBufPos, n);
+                        txBufPos += n;
+                        txRemain -= n;
+                        if (txBufPos >= 512) txBufPos = 0;  // sector done — loop hands off pending
+                    } else {
+                        // Endpoint NAK'd; a NAK'd token never completes so the
+                        // ISR won't fire again. The loop refills and arms EP1
+                        // itself (see update()).
+                        txWaitPend = true;
+                    }
+                } else if (botState == BOT_CSW) {
+                    dbgInPkts++;
+                    botState = BOT_IDLE;
+                    cbwPos   = 0;
+                    ep2Recv();
                 }
             }
-        } else if (ep == EP1_IN) {
-            // Bulk IN complete
-            USBFSD->UEP1_CTRL &= ~0x0040;
-            if (botState == BOT_DATA_IN) {
-                botState = BOT_CSW;
-                sendCSW();
-            } else if (botState == BOT_CSW) {
-                // CSW sent, reset state, prepare for next command
-                botState = BOT_IDLE;
-                cbwPos = 0;
-                ep2Recv();
-            }
-            dataProcessed = true;
-        } else if (ep == EP2_OUT) {
-            // Bulk OUT received
-            USBFSD->UEP2_CTRL &= ~0x8000;
-            uint16_t len = (USBFSD->RX_LEN & 0x3FF);
-            if (len > 0) {
-                if (botState == BOT_DATA_OUT) {
-                    // Receiving write data — store in msdBuf
-                    if (writeBufPos + len > 512) len = 512 - writeBufPos;
-                    pbuf_read(EP2_RX_OFF, msdBuf + writeBufPos, len);
-                    writeBufPos += len;
-                    if (writeBufPos >= 512) {
-                        // Full sector received — write to SD
-                        if (!sd::writeBlock(writeLBA, msdBuf)) {
-                            csw.bCSWStatus = 1;
-                            senseKey = 4;
-                        }
-                        writeLBA++;
-                        writeRemain--;
-                        writeBufPos = 0;
-                        if (writeRemain == 0) {
-                            csw.dCSWDataResidue = 0;
-                            botState = BOT_CSW;
-                            sendCSW();
-                        }
-                    }
-                } else {
-                    // Receiving CBW
-                    pbuf_read(EP2_RX_OFF, cbwBuf + cbwPos, len);
-                    cbwPos += len;
-                    if (cbwPos >= BOT_CBW_LEN) {
-                        cbwReady = true;
-                        cbwPos = 0;
-                    }
-                }
-            }
-            ep2Recv();
+            break;
         }
-    }
-ctr_done:
-    ;
 
-    // Clear CTR interrupt flag (write 0 to clear)
-    USBFSD->INT_FG = 0x80;
+        case USBFS_UIS_TOKEN_OUT: {
+            uint8_t ep = intst & USBFS_UIS_ENDP_MASK;
+            if (ep == 0) {
+                handleEP0Out();
+            } else if (ep == EP2_OUT) {
+                // Toggle mismatch: discard the packet, leave the endpoint
+                // armed so the host's retry (same toggle) is accepted.
+                if (!(intst & USBFS_UIS_TOG_OK)) {
+                    dbgTogFails++;
+                    uint8_t st = (uint8_t)botState;
+                    if (st < 4) dbgTogByState[st]++;
+                    break;
+                }
+
+                uint16_t len = USBFSD->RX_LEN & 0x3FF;
+                if (botState == BOT_DATA_OUT) {
+                    // Write data — accumulate into the fill slot
+                    // (writeHead + writeCount) % 3. The push is immediate: a
+                    // buffer reaching 512 bytes is committed to the FIFO right
+                    // away, so writeFill never lingers at 512 and a completing
+                    // sector is never left behind by the final flush in
+                    // update(). With three buffers the fill slot is distinct
+                    // from the full buffers even when a 64-byte OUT packet
+                    // straddles a sector boundary.
+                    uint16_t pos = 0;
+                    while (pos < len) {
+                        uint8_t  idx   = (uint8_t)(writeHead + writeCount) % 3;
+                        uint16_t space = 512 - writeFill;
+                        uint16_t n     = len - pos;
+                        if (n > space) n = space;
+                        memcpy(writeBufs[idx] + writeFill, ep2Buf + pos, n);
+                        writeFill += n;
+                        pos       += n;
+                        if (writeFill >= 512) {      // buffer complete — push to FIFO
+                            writeFill = 0;
+                            writeCount++;
+                        }
+                    }
+                    rxTotal += len;
+                } else {
+                    // CBW (may span several packets). If a CBW is already
+                    // queued but not yet processed by the loop, this packet is
+                    // the command's DATA phase — NAK it rather than misparse it
+                    // as a second CBW.
+                    if (cbwReady) {
+                        USBFSD->UEP2_CTRL_H = (USBFSD->UEP2_CTRL_H & ~USBFS_UEP_R_RES_MASK)
+                                            | USBFS_UEP_R_RES_NAK;
+                        break;
+                    }
+                    if (len > BOT_CBW_LEN - cbwPos) len = BOT_CBW_LEN - cbwPos;
+                    if (len > 0) {
+                        memcpy(cbwBuf + cbwPos, ep2Buf, len);
+                        cbwPos += len;
+                        if (cbwPos >= BOT_CBW_LEN) {
+                            cbwPos = 0;
+                            // WRITE_10 CBWs get their data phase armed here
+                            // (ISR-safe, see processWriteCBW) so the host's
+                            // first data packet is never lost to the loop's
+                            // cbwReady latency.
+                            if (cbwBuf[15] == SCSI_WRITE_10 && !(cbwBuf[12] & 0x80))
+                                processWriteCBW();
+                            else
+                                cbwReady = true;
+                        }
+                    }
+                }
+                // Re-arm for the next packet. If two buffers are full and the
+                // SD writes are falling behind, NAK to throttle the host; the
+                // loop re-arms with ACK once a buffer frees up. (One more
+                // packet may still be in flight while writeCount == 2 — it
+                // lands in the third buffer, which is always free here.)
+                if (botState == BOT_DATA_OUT && writeCount == 2) {
+                    USBFSD->UEP2_CTRL_H = (USBFSD->UEP2_CTRL_H & ~USBFS_UEP_R_RES_MASK)
+                                        | USBFS_UEP_R_RES_NAK;
+                } else {
+                    USBFSD->UEP2_CTRL_H = (USBFSD->UEP2_CTRL_H & ~USBFS_UEP_R_RES_MASK)
+                                        | USBFS_UEP_R_RES_ACK;
+                }
+            }
+            break;
+        }
+
+        default:  // USBFS_UIS_TOKEN_SOF
+            break;
+        }
+        USBFSD->INT_FG = USBFS_UIF_TRANSFER;
+    } else if (intflag & USBFS_UIF_BUS_RST) {
+        dbgBusResets++;
+        hostPresent    = true;
+        usbConfigured  = 0;
+        usbAddrPending = 0;
+        USBFSD->DEV_ADDR = 0;
+        usbEndpInit();
+        resetBOT();
+        USBFSD->INT_FG = USBFS_UIF_BUS_RST;
+    } else if (intflag & USBFS_UIF_SUSPEND) {
+        USBFSD->INT_FG = USBFS_UIF_SUSPEND;
+    } else {
+        USBFSD->INT_FG = intflag;
+    }
 }

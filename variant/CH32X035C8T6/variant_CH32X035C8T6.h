@@ -85,7 +85,7 @@
 
 
 #define NUM_DIGITAL_PINS        46
-#define NUM_ANALOG_INPUTS       10 //TODO: There should be more than this, but I haven't configured this.       
+#define NUM_ANALOG_INPUTS       10 
 #define ADC_RESOLUTION          12
 
 

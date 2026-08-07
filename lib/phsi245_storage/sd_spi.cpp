@@ -2,229 +2,386 @@
 #include <HAL.h>
 #include <Arduino.h>
 
-#if HW_VERSION == 2
+/*
+ * SD/MMC card driver in SPI mode.
+ *
+ * This is a faithful port of ChaN's reference driver from the FatFs sample
+ * projects: ffsample/stm32/mmc_stm32f1_spi.c ("MMCv3/SDv1/SDv2 (SPI mode)
+ * control module", (C)ChaN 2018, released under the FatFs open-source terms).
+ * The card init handshake, command framing, R1 decoding (byte-aligned, first
+ * byte with bit7 clear, max 10 bytes), and the select/deselect + wait_ready
+ * gating in send_cmd() are kept exactly as upstream. Keep the protocol intact
+ * if you modify this file.
+ *
+ * Replacing the previous hand-written init driver: the old code held CS low
+ * across ACMD41/CMD58 and decoded R1 by scanning the clocked bit stream for
+ * the first 0 after the idle 0xFF run (up to 128 bytes). ChaN's proven
+ * approach instead reselects the card and waits for it to be ready before
+ * every command, and reads R1 byte-aligned.
+ *
+ * NOTE on bit-bang migration: if hardware SPI ever again proves unreliable on
+ * this board (e.g. bit-shifted R1 bytes such as 0xE0 0x3F appearing at ACMD41),
+ * migrate the byte-I/O layer below (xchg_spi) to ChaN's bit-bang variant
+ * ffsample/generic/sdmm.c ("Foolproof MMCv3/SDv1/SDv2", (C)ChaN 2019). That
+ * driver uses the exact same protocol and command set but drives SCK/MOSI and
+ * reads MISO from plain GPIO pins, so no SPI-peripheral edge/timing bugs can
+ * corrupt responses. Everything else in this file stays unchanged.
+ */
 
 // SD card commands (SPI mode)
-#define CMD0    0x00  // GO_IDLE_STATE
-#define CMD1    0x01  // SEND_OP_COND
-#define CMD8    0x08  // SEND_IF_COND
-#define CMD9    0x09  // SEND_CSD
-#define CMD10   0x0A  // SEND_CID
-#define CMD12   0x0C  // STOP_TRANSMISSION
-#define CMD16   0x10  // SET_BLOCKLEN
-#define CMD17   0x11  // READ_SINGLE_BLOCK
-#define CMD24   0x18  // WRITE_BLOCK
-#define CMD55   0x37  // APP_CMD
-#define CMD58   0x3A  // READ_OCR
-#define ACMD41  0x29  // SD_SEND_OP_COND
+#define CMD0    0          // GO_IDLE_STATE
+#define CMD1    1          // SEND_OP_COND (MMC)
+#define CMD8    8          // SEND_IF_COND
+#define CMD9    9          // SEND_CSD
+#define CMD12   12         // STOP_TRANSMISSION
+#define CMD16   16         // SET_BLOCKLEN
+#define CMD17   17         // READ_SINGLE_BLOCK
+#define CMD18   18         // READ_MULTIPLE_BLOCK
+#define CMD24   24         // WRITE_BLOCK
+#define CMD55   55         // APP_CMD
+#define CMD58   58         // READ_OCR
+#define ACMD41  (0x80+41)  // SEND_OP_COND (SDC, via CMD55)
+
+// Card type flags
+#define CT_MMC   0x01
+#define CT_SDC1  0x02
+#define CT_SDC2  0x04
+#define CT_BLOCK 0x08
 
 namespace sd {
 
-static bool sdhc = false;    // true if SDHC/SDXC card
-static uint32_t blocks = 0;  // total block count
+static uint8_t CardType = 0;  // b0:MMC, b1:SDv1, b2:SDv2, b3:block addressing
+static uint32_t blocks = 0;   // total block count (read from CSD at init)
 
-// Send a command and get R1 response
-static uint8_t sdCommand(uint8_t cmd, uint32_t arg)
+// --- Diagnostic timing (temporary) ---
+static uint32_t dbgReadCalls = 0;   // readBlock() invocations
+static uint32_t dbgReadUs    = 0;   // total µs inside readBlock()
+static uint32_t dbgMaxReadUs = 0;   // longest single readBlock()
+static uint32_t dbgBenchUs   = 0;   // 512 dummy SPI bytes (byte-loop floor)
+
+// --- Byte I/O layer (platform dependent) ---
+// To migrate to ChaN's bit-bang driver (sdmm.c), replace xchg_spi with the
+// GPIO xmit_mmc/rcvr_mmc routines; the protocol below stays identical.
+static uint8_t xchg_spi(uint8_t dat)
 {
-    uint8_t buf[6];
-    buf[0] = cmd | 0x40;
-    buf[1] = arg >> 24;
-    buf[2] = arg >> 16;
-    buf[3] = arg >> 8;
-    buf[4] = arg;
-    buf[5] = (cmd == CMD0) ? 0x95 :
-             (cmd == CMD8) ? 0x87 : 0x01; // CRC (only matters for CMD0 and CMD8)
+    return spi_transfer(dat);
+}
 
-    for (int i = 0; i < 6; i++)
-        spi_transfer(buf[i]);
+/*-----------------------------------------------------------------------*/
+/* Wait for card ready                                                   */
+/*-----------------------------------------------------------------------*/
+static int wait_ready(uint32_t wt)  // 1:Ready, 0:Timeout (wt in ms)
+{
+    uint8_t d;
+    uint32_t t0 = millis();
+    do {
+        d = xchg_spi(0xFF);
+    } while (d != 0xFF && (uint32_t)(millis() - t0) < wt);
 
-    // Wait for non-0xFF response (up to 8 bytes)
-    uint8_t r1;
-    for (int i = 0; i < 8; i++) {
-        r1 = spi_transfer(0xFF);
-        if (!(r1 & 0x80)) break;
+    return (d == 0xFF) ? 1 : 0;
+}
+
+/*-----------------------------------------------------------------------*/
+/* Deselect the card and release SPI bus                                 */
+/*-----------------------------------------------------------------------*/
+static void deselect(void)
+{
+    spi_cs_high();      // Set CS# high
+    xchg_spi(0xFF);     // Dummy clock (force DO hi-z for multiple slave SPI)
+}
+
+/*-----------------------------------------------------------------------*/
+/* Select the card and wait for ready                                    */
+/*-----------------------------------------------------------------------*/
+static int select(void)  // 1:OK, 0:Timeout
+{
+    spi_cs_low();       // Set CS# low
+    xchg_spi(0xFF);     // Dummy clock (force DO enabled)
+    if (wait_ready(500)) return 1;
+
+    deselect();
+    return 0;
+}
+
+/*-----------------------------------------------------------------------*/
+/* Receive a data packet from the card                                   */
+/*-----------------------------------------------------------------------*/
+static int rcvr_datablock(uint8_t *buff, uint32_t btr)  // 1:OK, 0:Error
+{
+    uint8_t token;
+    uint32_t t0 = millis();
+
+    do {  // Wait for DataStart token in timeout of 200ms
+        token = xchg_spi(0xFF);
+    } while (token == 0xFF && (uint32_t)(millis() - t0) < 200);
+    if (token != 0xFE) return 0;  // Fail if not a valid data token
+
+    for (uint32_t i = 0; i < btr; i++)
+        buff[i] = xchg_spi(0xFF);  // Store trailing data to the buffer
+    xchg_spi(0xFF); xchg_spi(0xFF);  // Discard CRC
+
+    return 1;
+}
+
+/*-----------------------------------------------------------------------*/
+/* Send a data packet to the card                                        */
+/*-----------------------------------------------------------------------*/
+static int xmit_datablock(const uint8_t *buff, uint8_t token)  // 1:OK, 0:Failed
+{
+    uint8_t resp;
+
+    if (!wait_ready(500)) return 0;  // Wait for card ready
+
+    xchg_spi(token);  // Send token
+    if (token != 0xFD) {  // Send data if token is other than StopTran
+        for (int i = 0; i < 512; i++)
+            xchg_spi(buff[i]);  // Send the 512 byte data block
+        xchg_spi(0xFF); xchg_spi(0xFF);  // Dummy CRC
+
+        resp = xchg_spi(0xFF);  // Receive data response
+        if ((resp & 0x1F) != 0x05) return 0;  // Fail if the data was not accepted
     }
-    return r1;
+
+    return 1;
+}
+
+/*-----------------------------------------------------------------------*/
+/* Send a command packet to the card                                     */
+/*-----------------------------------------------------------------------*/
+static uint8_t send_cmd(uint8_t cmd, uint32_t arg)  // R1 resp (bit7==1: failed)
+{
+    uint8_t n, res;
+
+    if (cmd & 0x80) {  // ACMD<n> is the sequence CMD55 + CMD<n>
+        cmd &= 0x7F;
+        res = send_cmd(CMD55, 0);
+        if (res > 1) return res;
+    }
+
+    // Select the card and wait for ready except to stop multiple block read
+    if (cmd != CMD12) {
+        deselect();
+        if (!select()) return 0xFF;
+    }
+
+    // Send command packet
+    xchg_spi(0x40 | cmd);            // Start + command index
+    xchg_spi((uint8_t)(arg >> 24));  // Argument[31..24]
+    xchg_spi((uint8_t)(arg >> 16));  // Argument[23..16]
+    xchg_spi((uint8_t)(arg >> 8));   // Argument[15..8]
+    xchg_spi((uint8_t)arg);          // Argument[7..0]
+    n = 0x01;                        // Dummy CRC + Stop
+    if (cmd == CMD0) n = 0x95;       // Valid CRC for CMD0(0)
+    if (cmd == CMD8) n = 0x87;       // Valid CRC for CMD8(0x1AA)
+    xchg_spi(n);
+
+    // Receive command response
+    if (cmd == CMD12) xchg_spi(0xFF);  // Discard the following byte on CMD12
+    n = 10;                            // Wait for a valid response (10 bytes max)
+    do {
+        res = xchg_spi(0xFF);
+    } while ((res & 0x80) && --n);
+
+    return res;
 }
 
 uint8_t spiRecv()
 {
-    return spi_transfer(0xFF);
+    return xchg_spi(0xFF);
 }
 
+/*-----------------------------------------------------------------------*/
+/* Debug probe (temporary): raw CMD17 read at a block                     */
+/*-----------------------------------------------------------------------*/
+void probeReadCmd(uint32_t block, uint8_t *r1, uint8_t *token)
+{
+    *r1 = 0xFF;
+    *token = 0;
+    if (!CardType) return;
+
+    uint32_t sect = block;
+    if (!(CardType & CT_BLOCK)) sect <<= 9;  // Byte addressing for SDSC
+
+    *r1 = send_cmd(CMD17, sect);
+    if (*r1 == 0) {
+        uint32_t t0 = millis();
+        do {
+            *token = xchg_spi(0xFF);
+        } while (*token == 0xFF && (uint32_t)(millis() - t0) < 200);
+    }
+    deselect();
+}
+
+/*-----------------------------------------------------------------------*/
+/* Initialize the card                                                   */
+/*-----------------------------------------------------------------------*/
 bool init()
 {
     spi_init();
 
-    // Set slow clock for init (prescaler 256)
-    // Already set in spi_init()
+    // FCLK_SLOW() equivalent is already in effect: spi_init() runs SPI1 at
+    // prescaler 256 (~187kHz, below the 400kHz SD init limit). Once the card
+    // is identified below we raise the clock (ChaN's FCLK_FAST()) so data
+    // transfers run at ~12MHz instead of ~187kHz (~64x faster). The SPI-clock
+    // theory for the USB bread errors was falsified (identical failures at
+    // 12/6/3MHz while device-side SD reads showed 0 fails), so 12MHz is safe.
 
-    // Send >= 74 clock pulses with CS high
-    spi_cs_high();
-    for (int i = 0; i < 10; i++)
-        spi_transfer(0xFF);
+    for (int n = 10; n; n--) xchg_spi(0xFF);  // 80 dummy clocks, card gets ready
 
-    // CMD0: go idle
-    spi_cs_low();
-    uint8_t r1 = sdCommand(CMD0, 0);
-    spi_cs_high();
-    spi_transfer(0xFF);
-    if (r1 != 0x01) return false;
+    uint8_t ty = 0, cmd, ocr[4];
+    uint32_t t0 = millis();
 
-    // CMD8: check voltage range (2.7-3.6V)
-    spi_cs_low();
-    r1 = sdCommand(CMD8, 0x000001AA);
-    if (r1 == 0x01) {
-        // R7 response: 4 more bytes
-        uint8_t r7[4];
-        for (int i = 0; i < 4; i++) r7[i] = spi_transfer(0xFF);
-        spi_cs_high();
-        spi_transfer(0xFF);
-        // Check pattern
-        if (r7[2] != 0x01 || r7[3] != 0xAA)
-            return false;
-    } else if (r1 & 0x04) {
-        // Illegal command — v1 card, fine
-        spi_cs_high();
-        spi_transfer(0xFF);
-    } else {
-        spi_cs_high();
-        return false;
-    }
-
-    // ACMD41: initialize card
-    uint32_t timeout = 0;
-    do {
-        spi_cs_low();
-        sdCommand(CMD55, 0);
-        r1 = sdCommand(ACMD41, 0x40000000); // HCS bit for SDHC
-        spi_cs_high();
-        spi_transfer(0xFF);
-        if (++timeout > 1000) return false;
-    } while (r1 != 0x00);
-
-    // CMD58: read OCR (check CCS bit for SDHC)
-    spi_cs_low();
-    r1 = sdCommand(CMD58, 0);
-    if (r1 == 0x00) {
-        uint8_t ocr[4];
-        for (int i = 0; i < 4; i++) ocr[i] = spi_transfer(0xFF);
-        sdhc = (ocr[0] & 0x40) != 0;
-    }
-    spi_cs_high();
-    spi_transfer(0xFF);
-
-    // CMD16: set block length to 512
-    spi_cs_low();
-    sdCommand(CMD16, 512);
-    spi_cs_high();
-    spi_transfer(0xFF);
-
-    // Read CSD to get block count
-    uint8_t csd[16];
-    spi_cs_low();
-    r1 = sdCommand(CMD9, 0);
-    if (r1 == 0x00) {
-        // Wait for start token
-        timeout = 0;
-        while (spi_transfer(0xFF) != 0xFE && ++timeout < 100);
-        if (timeout < 100) {
-            for (int i = 0; i < 16; i++)
-                csd[i] = spi_transfer(0xFF);
-            // Skip 2 CRC bytes
-            spi_transfer(0xFF); spi_transfer(0xFF);
-
-            // Calculate block count from CSD
-            uint8_t csdVer = (csd[0] >> 6) & 0x03;
-            if (csdVer == 0) {
-                // CSD v1.0
-                uint32_t csize = ((csd[6] & 0x03) << 10) | (csd[7] << 2) | ((csd[8] >> 6) & 0x03);
-                uint8_t cmult = ((csd[9] & 0x03) << 1) | ((csd[10] >> 7) & 0x01);
-                uint32_t readBlLen = csd[5] & 0x0F;
-                blocks = (csize + 1) * (1UL << (cmult + 2)) * (1UL << (readBlLen - 9));
-            } else if (csdVer == 1) {
-                // CSD v2.0
-                uint32_t csize = ((csd[7] & 0x3F) << 16) | (csd[8] << 8) | csd[9];
-                blocks = (csize + 1) * 1024;
+    if (send_cmd(CMD0, 0) == 1) {         // Enter Idle state
+        if (send_cmd(CMD8, 0x1AA) == 1) { // SDv2?
+            for (int n = 0; n < 4; n++) ocr[n] = xchg_spi(0xFF);  // R7 response tail
+            if (ocr[2] == 0x01 && ocr[3] == 0xAA) {  // Voltage range 2.7-3.6V ok
+                while ((uint32_t)(millis() - t0) < 1000 && send_cmd(ACMD41, 1UL << 30)) ;  // ACMD41(HCS)
+                if ((uint32_t)(millis() - t0) < 1000 && send_cmd(CMD58, 0) == 0) {  // Check CCS in OCR
+                    for (int n = 0; n < 4; n++) ocr[n] = xchg_spi(0xFF);
+                    ty = (ocr[0] & 0x40) ? CT_SDC2 | CT_BLOCK : CT_SDC2;
+                }
             }
+        } else {  // SDv1 or MMCv3
+            if (send_cmd(ACMD41, 0) <= 1) {
+                ty = CT_SDC1; cmd = ACMD41;  // SDv1
+            } else {
+                ty = CT_MMC;  cmd = CMD1;    // MMCv3
+            }
+            while ((uint32_t)(millis() - t0) < 1000 && send_cmd(cmd, 0)) ;  // Wait for end of init
+            if ((uint32_t)(millis() - t0) >= 1000 || send_cmd(CMD16, 512) != 0)  // Set block length
+                ty = 0;
         }
     }
-    spi_cs_high();
+    CardType = ty;
+    deselect();
 
-    return blocks > 0;
+    if (!ty) {
+        blocks = 0;
+        return false;
+    }
+
+    // Read CSD to obtain the total block count (ChaN's GET_SECTOR_COUNT)
+    blocks = 0;
+    uint8_t csd[16];
+    if (send_cmd(CMD9, 0) == 0 && rcvr_datablock(csd, 16)) {
+        uint32_t cs;
+        if ((csd[0] >> 6) == 1) {  // CSD ver 2.00 (SDHC/SDXC)
+            cs = csd[9] + ((uint32_t)csd[8] << 8) + ((uint32_t)(csd[7] & 63) << 16) + 1;
+            blocks = cs << 10;
+        } else {                   // CSD ver 1.XX or MMC
+            uint8_t n = (csd[5] & 15) + ((csd[10] & 128) >> 7) + ((csd[9] & 3) << 1) + 2;
+            cs = (csd[8] >> 6) + ((uint32_t)csd[7] << 2) + ((uint32_t)(csd[6] & 3) << 10) + 1;
+            blocks = cs << (n - 9);
+        }
+    }
+    deselect();
+
+    bool ok = blocks > 0;
+    if (ok)
+        spi_set_prescaler(SPI_BaudRatePrescaler_4);  // FCLK_FAST(): ~12 MHz data clock (24 MHz was marginal: card undetectable)
+    return ok;
 }
 
+/*-----------------------------------------------------------------------*/
+/* Read one 512-byte block                                               */
+/*-----------------------------------------------------------------------*/
 bool readBlock(uint32_t block, uint8_t *buf)
 {
-    if (!sdhc)
-        block <<= 9; // byte addressing for SDSC
+    if (!CardType) return false;
 
-    spi_cs_low();
-    uint8_t r1 = sdCommand(CMD17, block);
-    if (r1 != 0x00) {
-        spi_cs_high();
-        return false;
+    uint32_t sect = block;
+    if (!(CardType & CT_BLOCK)) sect <<= 9;  // Byte addressing for SDSC
+
+    uint32_t t0 = micros();
+    bool ok = (send_cmd(CMD17, sect) == 0) && rcvr_datablock(buf, 512);
+    deselect();
+
+    uint32_t dt = micros() - t0;
+    dbgReadCalls++;
+    dbgReadUs += dt;
+    if (dt > dbgMaxReadUs) dbgMaxReadUs = dt;
+
+    // One-shot: time 512 dummy bytes to measure the pure SPI byte-loop cost
+    // (the floor a 512-byte block can never go below at this clock). Runs
+    // once, post-init, and does not touch the token-wait control flow.
+    static bool benchDone = false;
+    if (!benchDone) {
+        benchDone = true;
+        uint32_t b0 = micros();
+        for (int i = 0; i < 512; i++) xchg_spi(0xFF);
+        dbgBenchUs = micros() - b0;
     }
 
-    // Wait for start token 0xFE
-    uint16_t timeout = 0;
-    while (spi_transfer(0xFF) != 0xFE && ++timeout < 500);
-    if (timeout >= 500) {
-        spi_cs_high();
-        return false;
-    }
-
-    // Read 512 bytes
-    for (int i = 0; i < 512; i++)
-        buf[i] = spi_transfer(0xFF);
-
-    // Read and discard 2 CRC bytes
-    spi_transfer(0xFF);
-    spi_transfer(0xFF);
-
-    spi_cs_high();
-    // Send extra clock cycles
-    spi_transfer(0xFF);
-    return true;
+    return ok;
 }
 
+uint32_t readCalls()
+{
+    return dbgReadCalls;
+}
+
+uint32_t readUs()
+{
+    return dbgReadUs;
+}
+
+uint32_t maxReadUs()
+{
+    return dbgMaxReadUs;
+}
+
+uint32_t benchUs()
+{
+    return dbgBenchUs;
+}
+
+/*-----------------------------------------------------------------------*/
+/* Multi-block read (CMD18): stream several sectors with one command.     */
+/* The card stays selected (CS low) from beginReadMulti() until           */
+/* endReadMulti(), so the per-sector CMD17/select/token overhead is       */
+/* amortized away. The caller paces readMultiBlock() against its own      */
+/* consumer; the card merely pauses while we stop clocking.               */
+/*-----------------------------------------------------------------------*/
+
+// Start the stream. Returns R1 (0 = accepted, card left selected).
+uint8_t beginReadMulti(uint32_t block)
+{
+    if (!CardType) return 0xFF;
+
+    uint32_t sect = block;
+    if (!(CardType & CT_BLOCK)) sect <<= 9;  // Byte addressing for SDSC
+
+    return send_cmd(CMD18, sect);  // send_cmd() leaves the card selected
+}
+
+// Read the next 512-byte block from the stream (no CS toggling).
+bool readMultiBlock(uint8_t *buf)
+{
+    return rcvr_datablock(buf, 512);
+}
+
+// Stop the stream and deselect the card. The next select() waits out any
+// card busy from CMD12, so callers need no extra delay.
+void endReadMulti()
+{
+    send_cmd(CMD12, 0);  // send_cmd() special-cases CMD12 (no select/deselect)
+    deselect();
+}
+
+/*-----------------------------------------------------------------------*/
+/* Write one 512-byte block                                              */
+/*-----------------------------------------------------------------------*/
 bool writeBlock(uint32_t block, const uint8_t *buf)
 {
-    if (!sdhc)
-        block <<= 9;
+    if (!CardType) return false;
 
-    spi_cs_low();
-    uint8_t r1 = sdCommand(CMD24, block);
-    if (r1 != 0x00) {
-        spi_cs_high();
-        return false;
-    }
+    uint32_t sect = block;
+    if (!(CardType & CT_BLOCK)) sect <<= 9;  // Byte addressing for SDSC
 
-    // Send start token
-    spi_transfer(0xFE);
+    bool ok = (send_cmd(CMD24, sect) == 0) && xmit_datablock(buf, 0xFE);
+    deselect();
 
-    // Write 512 bytes
-    for (int i = 0; i < 512; i++)
-        spi_transfer(buf[i]);
-
-    // Write dummy CRC (2 bytes)
-    spi_transfer(0xFF);
-    spi_transfer(0xFF);
-
-    // Check data response token
-    uint8_t resp = spi_transfer(0xFF);
-    if ((resp & 0x1F) != 0x05) {
-        spi_cs_high();
-        return false;
-    }
-
-    // Wait for write to complete (card returns non-0xFF when busy)
-    uint16_t timeout = 0;
-    while (spi_transfer(0xFF) == 0x00 && ++timeout < 10000);
-    spi_cs_high();
-    spi_transfer(0xFF);
-
-    return timeout < 10000;
+    return ok;
 }
 
 uint32_t blockCount()
@@ -240,5 +397,3 @@ const BlockDevice DEVICE = {
 };
 
 } // namespace sd
-
-#endif // HW_VERSION == 2

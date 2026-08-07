@@ -1,7 +1,7 @@
 import sys
 import os
 
-from chprog import chprog
+import chprog
 
 if os.name == "nt":
     # There's an issue with loading incompatible libusb from the wrong place. This resolves that.

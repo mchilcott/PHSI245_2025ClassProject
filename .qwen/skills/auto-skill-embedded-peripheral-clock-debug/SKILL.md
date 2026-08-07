@@ -19,7 +19,7 @@ peripheral init code is identical. Why the difference?
 
 **Answer**: on revision A, some OTHER init path (SPI setup, ADC config, timer
 init) happens to enable the GPIO port clock before the peripheral init runs. On
-revision B, that other init path is guarded by `#if HW_VERSION` or runs in a
+revision B, that other init path is guarded by a build flag or runs in a
 different order, so the clock is still off when the peripheral tries to configure
 its pins.
 
@@ -39,14 +39,12 @@ void i2c_init(void) {
     GPIO_Init(GPIOA, &GPIO_InitStructure);       // writes to GPIOA — but clock is off!
 ```
 
-On v2 hardware: `spi_init()` (called during SD card mount) enables `RCC_APB2Periph_GPIOA`,
-so when `i2c_init()` runs later, the clock is already on. Display works.
-
-On v1 hardware: no SD card, `spi_init()` is never compiled. GPIOA clock is never
-enabled before `i2c_init()`. `GPIO_Init(GPIOA, ...)` writes to GPIOA's CFGLR/CFGHR
-registers but the hardware ignores writes to an unclocked peripheral. PA10/PA11
-stay in reset state (floating input). The I2C peripheral sends clock and data, but
-the signals go to the wrong physical pins. Display stays dark.
+In this codebase, `spi_init()` (called during SD card mount) enables
+`RCC_APB2Periph_GPIOA`, so when `i2c_init()` runs later, the clock is already on.
+Display works. If `spi_init()` is ever reordered or compiled out, `i2c_init()`
+would write to GPIOA's CFGLR/CFGHR registers while the clock is off — the
+hardware ignores writes to an unclocked peripheral, PA10/PA11 stay in reset
+state (floating input), and the display stays dark.
 
 ## Why the peripheral appears to work
 

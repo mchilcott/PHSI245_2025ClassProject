@@ -81,4 +81,20 @@ void drawNumber(int16_t x, int16_t y, uint16_t n, uint8_t digits);
 void drawMenu(int16_t x, int16_t y, const char *items[], uint8_t count,
               uint8_t cursor, uint8_t lineH = 12);
 
+// --- Scrollable lists ---
+
+// Compute a scroll offset so `cursor` (0..count-1) stays visible in a window
+// of `visible` rows. Returns 0 when everything fits. Callers persist the
+// returned offset between frames (see drawScrollMenu).
+uint8_t clampScroll(uint8_t cursor, uint8_t count, uint8_t visible);
+
+// Scrollable menu. Renders at most `visible` rows starting at *scroll; *scroll
+// is auto-clamped so the highlighted `cursor` row stays visible. The cursor
+// row is prefixed with ">", item text at (x + 8, ...). Content is drawn below
+// (x, y) and the caller is responsible for keeping the area clear of headers
+// or footers. lineH defaults to 8px (textSize 1).
+void drawScrollMenu(int16_t x, int16_t y, const char *items[], uint8_t count,
+                    uint8_t cursor, uint8_t visible, uint8_t *scroll,
+                    uint8_t lineH = 8);
+
 } // namespace gfx

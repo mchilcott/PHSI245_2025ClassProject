@@ -255,36 +255,6 @@ case STATE_ERROR:
 This gives the user an immediate audio indicator that something is wrong, even if
 they're not looking at the display.
 
-## Hardware revision awareness
-
-When supporting multiple hardware revisions (e.g. v1 without SD card, v2 with SD card),
-add a hardware-specific info state. Guard SD-dependent code with `#if HW_VERSION == 2`
-so the v1 binary skips storage entirely:
-
-```cpp
-#if HW_VERSION == 1
-case STATE_V1_INFO:
-    gfx::clear();
-    drawHeader("PHSI245 OS");
-    gfx::print("Hardware v1");
-    gfx::print("This revision has");
-    gfx::print("no SD card slot.");
-    // Footer: "B:OK"
-    break;
-#endif
-```
-
-In `setup()`, jump directly to this state on v1:
-
-```cpp
-#if HW_VERSION == 1
-    state = STATE_V1_INFO;
-#endif
-```
-
-This avoids trying to mount storage that doesn't exist and gives the user a clear
-explanation of the limitation.
-
 ## Header/footer convention
 
 Use consistent header (top 10px with a horizontal rule) and footer (bottom 9px with a

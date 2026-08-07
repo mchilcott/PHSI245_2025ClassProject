@@ -1,5 +1,10 @@
 .pio
+build/
 .vscode
 .venv
 .qwen/pending-skills/
 *.bak
+__pycache__/
+*.pyc
+# Generated Doxygen HTML
+doc_os/doc/

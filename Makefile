@@ -1,4 +1,4 @@
-.PHONY: upload upload-v1 build build-v1 clean build-game
+.PHONY: upload build clean build-game unbrick
 
 ENV ?= v2
 
@@ -8,19 +8,30 @@ build:
 upload: build
 	pio run -e $(ENV) -t upload
 
-build-v1:
-	pio run -e v1
-
-upload-v1: build-v1
-	pio run -e v1 -t upload
-
 # Build a game from src_games/ (e.g. make build-game GAME=OSDemo)
+# PLATFORMIO_SRC_DIR overrides the src_dir option for this build only, so
+# platformio.ini is left untouched. The game is linked for the app region
+# (linker/app_flash.ld, FLASH ORIGIN 0x8000) via PLATFORMIO_BUILD_FLAGS, which
+# suppresses the framework's Link.ld (the base builder skips its -T when a
+# -Wl,-T flag is already present).
+#
+# The raw firmware.bin is then wrapped with a 20-byte "PH25" header + CRC-32
+# (prog_tools/mkapp.py) so the bootloader can verify it before flashing. The
+# wrapped image goes to a stable, game-specific path (build/games/<GAME>.bin)
+# so a later bootloader build can't clobber it. Flash the wrapped image onto
+# the SD card and use "A:Exec" in the bootloader file browser.
+APP_LINKER := $(CURDIR)/linker/app_flash.ld
+
 build-game:
 	@[ "${GAME}" ] || (echo "Usage: make build-game GAME=<name>  (e.g. GAME=OSDemo)"; exit 1)
-	@cp platformio.ini platformio.ini.bak
-	@printf '\nplatformio.src_dir = src_games/%s\n' "${GAME}" >> platformio.ini
-	pio run -e $(ENV) || (mv platformio.ini.bak platformio.ini; exit 1)
-	@mv platformio.ini.bak platformio.ini
+	@[ -d "src_games/$(GAME)" ] || (echo "ERROR: no game directory 'src_games/$(GAME)'"; echo "Available games:"; ls -1 src_games; exit 1)
+	PLATFORMIO_BUILD_FLAGS="-Wl,-T,$(APP_LINKER)" PLATFORMIO_SRC_DIR=src_games/$(GAME) pio run -e $(ENV)
+	@mkdir -p build/games
+	@python3 prog_tools/mkapp.py .pio/build/$(ENV)/firmware.bin build/games/$(GAME).bin
+	@echo "Game image: build/games/$(GAME).bin (copy to the SD card)"
 
 clean:
 	pio run -t clean
+
+unbrick:
+	python3 prog_tools/wipe_chip.py

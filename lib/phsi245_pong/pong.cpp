@@ -78,14 +78,14 @@ void update()
     }
 
     if (ballX >= 127) {
-        beep::tone(220, 300);
         playing = false;
+        beep::tone(220, 120);
     }
 
     if (input::pressed(PIN_BTN_UP)   && paddleY > 2)           paddleY -= 2;
     if (input::pressed(PIN_BTN_DOWN) && paddleY < 62 - PADDLE_H) paddleY += 2;
 
-    if (input::justPressed(PIN_BTN_B)) {
+    if (input::pressed(PIN_BTN_B)) {
         playing = false;
     }
 }
