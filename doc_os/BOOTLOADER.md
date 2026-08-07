@@ -177,8 +177,8 @@ menu. Hold **B** at reset to skip auto-boot and enter the bootloader UI.
 
 | Region | Start | Size | Contents |
 |--------|-------|------|----------|
-| Bootloader | `0x00000000` | 32 KB | This bootloader (must stay `< 0x8000`) |
-| App (code) | `0x00008000` | 30464 B | Linked game image (`APP_BASE` + `APP_MAX_SIZE`) |
+| Bootloader | `0x00000000` | 33 KB used | This bootloader (image must end below `APP_BASE 0x8100`) |
+| App (code) | `0x00008100` | 30207 B | Linked game image (`APP_BASE` + `APP_MAX_SIZE`) |
 | Descriptor page | `0x0000F700` | 256 B | Magic + loadaddr + size + CRC32 of flashed app |
 | — | `0x0000F800` | — | End of 62 KB flash (no flash above `0xF7FF`) |
 
@@ -188,7 +188,7 @@ alias cannot be erased or programmed. `flashProgramPage()` therefore adds
 `FLASH_REGION_BASE` (`0x08000000`) to every address passed to
 `FLASH_BufLoad` / `FLASH_ErasePage_Fast` / `FLASH_ProgramPage_Fast`.
 
-The app image is linked for `0x00008000` (see `linker/app_flash.ld`) so its
+The app image is linked for `0x00008100` (see `linker/app_flash.ld`) so its
 reset vector lands at the app base; its startup (`_start` → `handle_reset`) is
 fully self-contained — it re-initializes SP, `.data`, `.bss`, sets `mtvec` to
 its own vector table, runs `SystemInit`, and calls `main`.
@@ -204,13 +204,13 @@ Offset  Size  Field
 0x00    4     Magic      "PH25"
 0x04    2     Version    = 1
 0x06    2     Flags      = 0
-0x08    4     Load addr  = 0x00008000 (APP_BASE)
-0x0C    4     Code size  (≤ 30464)
+0x08    4     Load addr  = 0x00008100 (APP_BASE)
+0x0C    4     Code size  (≤ 30207)
 0x10    4     CRC-32     (zlib, over code)
 0x14    N     Raw code
 ```
 
-Games larger than 30464 bytes are rejected at build time; the bootloader also
+Games larger than 30207 bytes are rejected at build time; the bootloader also
 rejects images that fail the header/CRC checks.
 
 ### Load & Run Flow
@@ -238,7 +238,7 @@ Browse ──A──► File Info ──A──► Executing ──success──
 3. **Descriptor** — on success the 256-byte descriptor page at `0x0000F700`
    is written (magic `PH25`, load addr, code size, CRC-32). It is only written
    after a fully verified write, so a partial flash never auto-boots.
-4. **Jump** — `appJump()` disables interrupts and jumps to `0x00008000`,
+4. **Jump** — `appJump()` disables interrupts and jumps to `0x00008100`,
    which is the app's `_start` (`j handle_reset`).
 
 ### Boot-Time Validation

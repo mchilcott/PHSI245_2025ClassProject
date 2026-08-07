@@ -7,7 +7,7 @@ Reads the raw linker output of a game build (linked at APP_BASE) and emits a
     [0..3]   magic     "PH25"
     [4..5]   version   1
     [6..7]   flags     0
-    [8..11]  loadaddr  APP_BASE (0x00008000)
+    [8..11]  loadaddr  APP_BASE (0x00008100)
     [12..15] codesize  len(code)
     [16..19] crc32     zlib CRC-32 of code (matches on-device table CRC-32)
     [20..]   code
@@ -19,8 +19,8 @@ import struct
 import sys
 import zlib
 
-APP_BASE = 0x00008000
-APP_MAX_SIZE = 0x7700  # 30464 B — mirrors APP_MAX_SIZE in src/flash_load.h
+APP_BASE = 0x00008100
+APP_MAX_SIZE = 0x75FF  # 30207 B — mirrors APP_MAX_SIZE in src/flash_load.h
 APP_MAGIC = b"PH25"
 APP_VERSION = 1
 HEADER_SIZE = 20

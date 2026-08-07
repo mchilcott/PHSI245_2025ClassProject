@@ -1,12 +1,15 @@
-.PHONY: upload build clean build-game unbrick
+.PHONY: upload build clean build-game unbrick upload-game
 
 ENV ?= v2
 
 build:
 	pio run -e $(ENV)
+	python3 prog_tools/check_boot.py .pio/build/$(ENV)/firmware.bin
+	cp .pio/build/$(ENV)/firmware.bin build/bootloader.bin
 
 upload: build
-	pio run -e $(ENV) -t upload
+	#pio run -e $(ENV) -t upload
+	python3 prog_tools/chip_tool.py flash build/bootloader.bin
 
 # Build a game from src_games/ (e.g. make build-game GAME=OSDemo)
 # PLATFORMIO_SRC_DIR overrides the src_dir option for this build only, so
@@ -34,4 +37,8 @@ clean:
 	pio run -t clean
 
 unbrick:
-	python3 prog_tools/wipe_chip.py
+	python3 prog_tools/chip_tool.py wipe
+
+upload-game:
+	@[ "${GAME}" ] || (echo "Usage: make upload-game GAME=<name>  (e.g. GAME=OSDemo)"; exit 1)
+	python3 prog_tools/chip_tool.py flash-pair build/bootloader.bin build/games/$(GAME).bin

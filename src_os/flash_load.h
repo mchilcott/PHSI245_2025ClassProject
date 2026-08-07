@@ -3,22 +3,30 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-// Flash partition (must match linker/app_flash.ld and prog_tools/mkapp.py).
-// Addresses here are the *execution* aliases at 0x0000_0000 (what the CPU runs
-// and reads). The physical flash region is at 0x0800_0000; the alias cannot be
-// erased or programmed, so every flash-controller access must add
-// FLASH_REGION_BASE. See flashProgramPage() in flash_load.cpp.
+// Flash partition (must match linker/app_flash.ld, prog_tools/mkapp.py and
+// prog_tools/chip_tool.py). Addresses here are the *execution* aliases at
+// 0x0000_0000 (what the CPU runs and reads). The physical flash region is at
+// 0x0800_0000; the alias cannot be erased or programmed, so every
+// flash-controller access must add FLASH_REGION_BASE. See flashProgramPage()
+// in flash_load.cpp.
 //
-//   0x0000_0000 - 0x0000_7FFF   bootloader (32 KB)
-//   0x0000_8000 - 0x0000_F6FF   app code    (APP_BASE, up to APP_MAX_SIZE)
+// APP_BASE must be page-aligned (0x100) and strictly above the end of the
+// bootloader image, or loading an app corrupts the bootloader's flash image
+// (the .data initializers in its tail) and the device comes up dead. The
+// Makefile's build target rejects a bootloader image that does not fit below
+// APP_BASE. The bootloader currently ends at ~0x80BC; 0x8100 keeps 68 bytes
+// of headroom and only costs games 257 bytes of budget.
+//
+//   0x0000_0000 - 0x0000_80FF   bootloader (must end below APP_BASE)
+//   0x0000_8100 - 0x0000_F6FF   app code    (APP_BASE, up to APP_MAX_SIZE)
 //   0x0000_F700 - 0x0000_F7FF   app descriptor page (magic/loadaddr/size/crc)
 //   (device flash ends at 0x0000_F7FF = 62 KB; no tail beyond that)
 
 // Physical flash region base (not the alias). Matches FLASH_BASE in the HAL.
 #define FLASH_REGION_BASE 0x08000000u
 
-#define APP_BASE         0x00008000u
-#define APP_MAX_SIZE     0x7700u   // 30464 bytes (app region minus descriptor page)
+#define APP_BASE         0x00008100u
+#define APP_MAX_SIZE     0x75FFu   // 30207 bytes (app region minus descriptor page)
 #define DESC_ADDR        0x0000F700u
 #define APP_MAGIC        0x35324850u  // "PH25" as little-endian u32
 

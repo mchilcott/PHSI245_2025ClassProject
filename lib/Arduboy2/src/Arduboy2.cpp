@@ -31,57 +31,31 @@ bool Arduboy2Base::justRendered = false;
 void Arduboy2Base::begin()
 {
   beginDoFirst();
-  
-  bootLogo();
-  // alternative logo functions. Work the same as bootLogo() but may reduce
-  // memory size if the sketch uses the same bitmap drawing function or
-  // `Sprites`/`SpritesB` class
-//  bootLogoCompressed();
-//  bootLogoSpritesSelfMasked();
-//  bootLogoSpritesOverwrite();
-//  bootLogoSpritesBSelfMasked();
-//  bootLogoSpritesBOverwrite();
 
-  waitNoButtons(); // wait for all buttons to be released
+  // The boot logo and button waits are intentionally omitted: apps should
+  // drop straight into the OS/game without a logo or boot-time button checks.
 }
 
 void Arduboy2Base::beginDoFirst()
 {
-  boot(); // raw hardware
+  boot(); // raw hardware + OS setup
   display(); // blank the display (sBuffer is global, so cleared automatically)
-
-  flashlight(); // light the RGB LED and screen if UP button is being held.
-
-  // check for and handle buttons held during start up for system control
-  systemButtons();
 
   audio.begin();
 }
 
 void Arduboy2Base::flashlight()
 {
-  if (!pressed(UP_BUTTON)) {
-    return;
-  }
-
-  sendLCDCommand(OLED_ALL_PIXELS_ON); // smaller than allPixelsOn()
-  digitalWriteRGB(RGB_ON, RGB_ON, RGB_ON);
-
-  while (true) {
-    idle();
-  }
+  // Intentionally disabled on this platform: holding UP at boot used to latch
+  // the OLED into all-pixels-on and hang the app due to transient touch reads.
+  // The bootloader handles recovery now, so this "feature" is removed.
 }
 
 void Arduboy2Base::systemButtons()
 {
-  while (pressed(B_BUTTON)) {
-    digitalWriteRGB(BLUE_LED, RGB_ON); // turn on blue LED
-    sysCtrlSound(UP_BUTTON + B_BUTTON, GREEN_LED, 0xff);
-    sysCtrlSound(DOWN_BUTTON + B_BUTTON, RED_LED, 0);
-    delayShort(200);
-  }
-
-  digitalWriteRGB(BLUE_LED, RGB_OFF); // turn off blue LED
+  // Intentionally disabled on this platform: the B-button boot-time audio
+  // toggle could hang startup on a transient touch read. Audio is controlled
+  // per-game instead.
 }
 
 void Arduboy2Base::sysCtrlSound(uint8_t buttons, uint8_t led, uint8_t eeVal)
@@ -1085,20 +1059,10 @@ bool Arduboy2::textRaw = false;
 // Aruduboy2Base::begin()
 void Arduboy2::begin()
 {
-  
   beginDoFirst();
 
-  bootLogo();
-  // alternative logo functions. Work the same as bootLogo() but may reduce
-  // memory size if the sketch uses the same bitmap drawing function or
-  // `Sprites`/`SpritesB` class
-//  bootLogoCompressed();
-//  bootLogoSpritesSelfMasked();
-//  bootLogoSpritesOverwrite();
-//  bootLogoSpritesBSelfMasked();
-//  bootLogoSpritesBOverwrite();
-
-  waitNoButtons();
+  // The boot logo and button waits are intentionally omitted: apps should
+  // drop straight into the OS/game without a logo or boot-time button checks.
 }
 
 void Arduboy2::bootLogo()

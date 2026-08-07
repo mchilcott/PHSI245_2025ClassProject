@@ -199,36 +199,37 @@ class Programmer:
         self.sendcommand(CH_STR_REBOOT)
 
     # Perform flash operations
-    def writeflash(self, data, mode):
+    def writeflash(self, data, mode, offset=0):
         # Encrypt data
         if (len(data) % CH_XOR_KEY_LEN) > 0:
-            data += b'0xff' * (CH_XOR_KEY_LEN - (len(data) % CH_XOR_KEY_LEN))
+            data += b'\xff' * (CH_XOR_KEY_LEN - (len(data) % CH_XOR_KEY_LEN))
         data = bytearray(data)
         for x in range(len(data)):
             data[x] ^= self.xorkey[x % CH_XOR_KEY_LEN]
 
         # Send data in chunks of 56 bytes
-        rest    = len(data)
-        offset  = 0
-        pkt_len = 0
+        rest  = len(data)
+        pos   = 0
         while rest > 0:
             pkt_len = min(rest, 0x38)
             stream  = bytes((mode, pkt_len + 5, 0))
-            stream += offset.to_bytes(4, byteorder='little')
+            stream += (offset + pos).to_bytes(4, byteorder='little')
             stream += (rest & 0xff).to_bytes(1, byteorder='little')
-            stream += data[offset:(offset + pkt_len)]
+            stream += data[pos:(pos + pkt_len)]
             reply   = self.sendcommand(stream)
+            if reply is None:
+                raise Exception('No reply from bootloader (USB gone?)')
             if reply[4] != 0x00 and reply[4] != 0xfe and reply[4] != 0xf5:
                 if mode == CH_CMD_CODE_WRITE:
-                    raise Exception('Failed to write at offset 0x%08x' % offset)
+                    raise Exception('Failed to write at offset 0x%08x' % (offset + pos))
                 elif mode == CH_CMD_CODE_VERIFY:
-                    raise Exception('Failed to verify at offset 0x%08x' % offset)
-            offset += pkt_len
-            rest   -= pkt_len
+                    raise Exception('Failed to verify at offset 0x%08x' % (offset + pos))
+            pos += pkt_len
+            rest -= pkt_len
 
         # Some chips need a last empty write
         if (self.lastwrite) and (mode == CH_CMD_CODE_WRITE):
-            stream = bytes((mode, 5, 0)) + offset.to_bytes(4, byteorder='little') + b'\x00'
+            stream = bytes((mode, 5, 0)) + (offset + pos).to_bytes(4, byteorder='little') + b'\x00'
             self.sendcommand(stream)
 
 # ===================================================================================

@@ -5,7 +5,12 @@
 */
 
 #include <Arduino.h>
-#include "os_libs.h"
+#include <HAL.h>
+#include "gfx.h"
+#include "input.h"
+#include "ostime.h"
+#include "beep.h"
+#include "random.h"
 
 // --- Bitmap data (unchanged from original) ---
 #ifndef BITMAPS_H

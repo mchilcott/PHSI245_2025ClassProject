@@ -229,23 +229,13 @@ class Arduboy2Base : public Arduboy2Core
   static Arduboy2Audio audio;
 
   /** \brief
-   * Initialize the hardware, display the boot logo, provide boot utilities, etc.
+   * Set up the hardware and OS for the sketch.
    *
    * \details
    * This function should be called once near the start of the sketch,
    * usually in `setup()`, before using any other functions in this class.
-   * It initializes the display, displays the boot logo, provides "flashlight"
-   * and system control features and initializes audio control.
-   *
-   * \note
-   * \parblock
-   * If it becomes necessary to free up some code space for use by the sketch,
-   * `boot()` can be used instead of `begin()` to allow the elimination of
-   * some of the things that aren't absolutely required.
-   *
-   * See the README file or main page, in section
-   * _Substitute or remove boot up features_, for more details.
-   * \endparblock
+   * It initializes the display and touch buttons (loading any stored touch
+   * calibration) and initializes audio control. No boot logo is shown.
    *
    * \see boot()
    */
@@ -279,26 +269,10 @@ class Arduboy2Base : public Arduboy2Core
    * Turn the RGB LED and display fully on to act as a small flashlight/torch.
    *
    * \details
-   * Checks if the UP button is pressed and if so turns the RGB LED and all
-   * display pixels fully on. If the UP button is detected, this function
-   * does not exit. The Arduboy must be restarted after flashlight mode is used.
+   * Disabled on this platform. Retained as a no-op so existing sketches
+   * compile unchanged; the bootloader handles device recovery instead.
    *
-   * This function is called by `begin()` and should be called by a sketch
-   * after `boot()` unless `safeMode()` is called instead.
-   *
-   * \note
-   * \parblock
-   * This function also contains code to address a problem with uploading a new
-   * sketch, for sketches that interfere with the bootloader "magic number".
-   * This problem occurs with certain sketches that use large amounts of RAM.
-   * Being in flashlight mode when uploading a new sketch can fix this problem.
-   *
-   * Therefore, for sketches that use `boot()` instead of `begin()`, a call to
-   * `flashlight()` should be included after calling `boot()`. If program space
-   * is limited, `safeMode()` can be used instead of `flashlight()`.
-   * \endparblock
-   *
-   * \see begin() boot() safeMode()
+   * \see begin() boot()
    */
   static void flashlight();
 
@@ -306,15 +280,8 @@ class Arduboy2Base : public Arduboy2Core
    * Handle buttons held on startup for system control.
    *
    * \details
-   * This function is called by `begin()` and can be called by a sketch
-   * after `boot()`.
-   *
-   * Hold the B button when booting to enter system control mode.
-   * The B button must be held continuously to remain in this mode.
-   * Then, pressing other buttons will perform system control functions:
-   *
-   * - UP: Set "sound enabled" in EEPROM
-   * - DOWN: Set "sound disabled" (mute) in EEPROM
+   * Disabled on this platform. Retained as a no-op so existing sketches
+   * compile unchanged; audio is controlled per-game instead.
    *
    * \see begin() boot()
    */

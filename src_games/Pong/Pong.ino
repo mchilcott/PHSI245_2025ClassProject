@@ -1,5 +1,10 @@
 #include <Arduino.h>
-#include "os_libs.h"
+#include <HAL.h>
+#include "gfx.h"
+#include "input.h"
+#include "ostime.h"
+#include "beep.h"
+#include "random.h"
 #include "pong.h"
 
 void setup()

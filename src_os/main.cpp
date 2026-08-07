@@ -34,6 +34,11 @@ static void printHex16(uint32_t v)
 #define ITEM_H      8
 #define MAX_VISIBLE 5
 
+// How long setup() samples the touch buttons before deciding whether to
+// auto-boot a flashed game. Must be long enough for the touch-key ADC to
+// warm up so a held B is never missed.
+#define BOOT_BUTTON_WINDOW_MS 500
+
 // --- File entry ---
 
 struct FileEntry {
@@ -536,21 +541,48 @@ void setup()
 {
     os_libs_init();  // ensure all OS libraries are linked (even if unused elsewhere)
 
-    // Sample the touch buttons BEFORE the auto-boot check. input::pressed()
-    // only reflects state captured by input::update(), which normally first
-    // runs in loop(); without this the B-hold skip below can never trigger.
-    input::update();
+    // If a game is flashed it auto-boots on the next power-up. Holding B
+    // must reliably cancel that, so sample the touch buttons for a full
+    // debounce window instead of once: the touch-key ADC needs a warm-up
+    // read or two, and a single early sample can miss a held B and trap the
+    // user inside the auto-booted game (B and A holds would then both fail).
+    bool valid = appValidInstalled();
+    bool wantA = false;
+    bool wantB = false;
+
+    if (valid) {
+        gfx::clear();
+        gfx::setCursor(8, 22);
+        gfx::print("Hold B for Menu...");
+        gfx::display();
+
+        for (uint32_t t0 = millis(); millis() - t0 < BOOT_BUTTON_WINDOW_MS; ) {
+            input::update();
+            if (input::pressed(PIN_BTN_A)) wantA = true;
+            if (input::pressed(PIN_BTN_B)) wantB = true;
+            ostime::delay_ms(10);
+        }
+    } else {
+        // No game installed: nothing to auto-boot, so keep the original
+        // single sample (still needed for the A-hold programming mode).
+        input::update();
+        wantA = input::pressed(PIN_BTN_A);
+        wantB = input::pressed(PIN_BTN_B);
+    }
 
     // Jump to programming mode if A is held at power-up
-    if (input::pressed(PIN_BTN_A)) {
+    if (wantA) {
         led::on(PIN_LED_1);
         delay(100);
         jump_to_programming_mode();
     }
-    
+
     // Auto-boot the flashed game unless B is held at power-up. The app's own
     // startup (handle_reset) re-inits SP/.data/.bss/mtvec and runs SystemInit.
-    if (!input::pressed(PIN_BTN_B) && appValidInstalled()) {
+    // LED0 lights right before the jump: lit + frozen screen afterwards means
+    // the app was entered and faulted; never lit means we didn't reach here.
+    if (!wantB && valid) {
+        led::on(PIN_LED_0);
         appJump();
     }
 

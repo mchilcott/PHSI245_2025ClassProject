@@ -15,7 +15,7 @@ make build-game GAME=HelloNOISE
 
 The `build-game` target overrides `src_dir` via the `PLATFORMIO_SRC_DIR`
 environment variable, so `platformio.ini` is never modified. The game is
-linked for the app region (`0x8000`+, max 30464 bytes) and wrapped with a
+linked for the app region (`0x8100`+, max 30207 bytes) and wrapped with a
 20-byte `PH25` header + CRC-32 (`prog_tools/mkapp.py`) into
 `build/games/<GAME>.bin`, so a later bootloader build (which overwrites
 `.pio/build/v2/firmware.bin`) can't clobber it. Copy that file to the SD card

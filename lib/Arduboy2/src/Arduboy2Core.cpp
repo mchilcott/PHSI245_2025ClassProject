@@ -83,6 +83,11 @@ void Arduboy2Core::boot()
   bootOLED();
   bootPowerSaving();
   EEPROM.begin();
+
+  // Load the calibrated touch thresholds stored by the bootloader (if any)
+  // so button reads are reliable from the very first poll. Silent: no prompt
+  // is shown, so this is safe to run for every app at startup.
+  touchCalibrate();
 }
 
 // Pins are set to the proper modes and levels for the specific hardware.

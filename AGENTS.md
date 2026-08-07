@@ -18,9 +18,13 @@ is no v1 board support — code should not use `HW_VERSION` guards.
   `Link.ld`), then wrapped with a 20-byte `PH25` header + CRC-32 by
   `prog_tools/mkapp.py` into `build/games/<GAME>.bin`. Copy that file to the
   SD card and select it with **A** in the bootloader browser.
-- Games are limited to 30464 bytes of code (app region `0x8000`–`0xF6FF`);
+- Games are limited to 30207 bytes of code (app region `0x8100`–`0xF6FF`);
   `mkapp.py` rejects larger builds. `APP_BASE`/`APP_MAX_SIZE` live in
   `src/flash_load.h` and must match `linker/app_flash.ld` and `mkapp.py`.
+  `APP_BASE` (0x8100) is deliberately **above** the end of the bootloader
+  image (currently ~0x80BC); the `build` target refuses a bootloader image
+  that reaches `APP_BASE`, because loading an app over the bootloader's
+  `.data` tail is what bricks the device (dead on next power-up, no LED).
 - A game's directory must contain `<Name>.ino` — the file name must match the
   directory name (PlatformIO convention).
 - There is no test suite or linter; a clean build is the verification.
@@ -57,7 +61,7 @@ State machine: auto-boot check (jump to the flashed game unless **B** is held
 or no valid app is installed) → blink test → loading screen (SD mount happens
 at 30–60% via `storage::sdAvailable()`) → file browser or "No SD Card" info
 screen. Selecting **A** on a `.bin` file verifies + flashes it into the app
-region (`0x8000`) and jumps to it (real load-and-run, `src/flash_load.cpp`).
+region (`0x8100`) and jumps to it (real load-and-run, `src/flash_load.cpp`).
 A main menu is reachable with:
 - **Play Pong** — uses the shared `phsi245_pong` library
 - **Calibrate Touch** — recalibrates thresholds; calibration also runs at
