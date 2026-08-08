@@ -4,28 +4,6 @@
 #include "flash_load.h"
 #include "ch32x035.h"
 
-// --- Diagnostics ---
-// printHex: 2-digit hex for the USB register readback on the MSD screen.
-static void printHex(uint8_t v)
-{
-    static const char hex[] = "0123456789ABCDEF";
-    char buf[3] = { hex[(v >> 4) & 0xF], hex[v & 0xF], 0 };
-    gfx::print(buf);
-}
-
-// printHex16: fixed 4-digit hex so diagnostics rows never overflow 128px.
-static void printHex16(uint32_t v)
-{
-    static const char hex[] = "0123456789ABCDEF";
-    char buf[5];
-    for (uint8_t i = 0; i < 4; i++) {
-        buf[3 - i] = hex[v & 0xF];
-        v >>= 4;
-    }
-    buf[4] = '\0';
-    gfx::print(buf);
-}
-
 // --- Constants ---
 
 #define MAX_FILES   64
@@ -144,7 +122,6 @@ enum State {
     STATE_ERROR,
     STATE_NO_SD,
     STATE_MENU,
-    STATE_PONG,
     STATE_CALIBRATE,
     STATE_FORMAT,
     STATE_MSD,
@@ -266,29 +243,13 @@ static void formatSize(char *buf, uint32_t size)
     }
 }
 
-// Temporary debug helper (remove before release)
-static void printU32(uint32_t v)
-{
-    char buf[11];
-    uint8_t n = 0;
-    do { buf[n++] = '0' + (char)(v % 10); v /= 10; } while (v && n < 10);
-    char tmp;
-    for (uint8_t i = 0; i < n / 2; i++) {
-        tmp = buf[i];
-        buf[i] = buf[n - 1 - i];
-        buf[n - 1 - i] = tmp;
-    }
-    buf[n] = '\0';
-    gfx::print(buf);
-}
-
 // --- Drawing ---
 
 static void drawLoading()
 {
     gfx::clear();
     gfx::setCursor(8, 22);
-    gfx::print("PHSI245 OS Bootloader");
+    gfx::print("PHSI245 OS");
 
     drawProgressBar(loadingPct);
 
@@ -297,62 +258,17 @@ static void drawLoading()
     gfx::display();
 }
 
-// Temporary debug screen: partition layout and raw SD read probes.
-static void drawDiagnostic()
+static void drawEmptyDir()
 {
-    DiagInfo d = fat::getDiag();
-
     gfx::clear();
-    drawHeader("SD Diag");
+    drawHeader("File Browser");
 
-    // Filesystem type + card size in blocks (from CSD)
-    gfx::setCursor(2, LIST_Y);
-    gfx::print("FS");
-    printU32(d.fatType);
-    gfx::print(" ");
-    printU32(d.totalBlocks);
-    gfx::print("blk");
-
-    // Partition / FAT layout (LBAs)
     gfx::setCursor(2, LIST_Y + 8);
-    gfx::print("p");
-    printU32(d.partStart);
-    gfx::print(" f");
-    printU32(d.firstFATSector);
-    gfx::print(" d");
-    printU32(d.firstDataSector);
-
-    gfx::setCursor(2, LIST_Y + 16);
-    gfx::print("root");
-    printU32(d.rootDirCluster);
-    gfx::print(" s");
-    printU32(d.sectorsPerCluster);
-
-    // Raw read probes across the card (bit i = LBA probes[i] read OK)
-    gfx::setCursor(2, LIST_Y + 24);
-    gfx::print("probe ");
-    char s[3];
-    s[0] = "0123456789ABCDEF"[d.probeMask >> 4];
-    s[1] = "0123456789ABCDEF"[d.probeMask & 0x0F];
-    s[2] = '\0';
-    gfx::print(s);
-
-    // Raw CMD17 at the root dir sector (R1 0 = accepted, token FE = data)
-    gfx::setCursor(2, LIST_Y + 32);
-    gfx::print("root R1=");
-    s[0] = "0123456789ABCDEF"[d.rootR1 >> 4];
-    s[1] = "0123456789ABCDEF"[d.rootR1 & 0x0F];
-    s[2] = '\0';
-    gfx::print(s);
-    gfx::print(" T=");
-    s[0] = "0123456789ABCDEF"[d.rootToken >> 4];
-    s[1] = "0123456789ABCDEF"[d.rootToken & 0x0F];
-    s[2] = '\0';
-    gfx::print(s);
+    gfx::print("No files found");
 
     gfx::drawFastHLine(0, GFX_HEIGHT - 9, GFX_WIDTH, GFX_WHITE);
     gfx::setCursor(2, GFX_HEIGHT - 7);
-    gfx::print("B:Menu");
+    gfx::print("B:Back");
 
     gfx::display();
 }
@@ -363,7 +279,7 @@ static void drawBrowse()
     drawPathHeader();
 
     if (fileCount == 0) {
-        drawDiagnostic();
+        drawEmptyDir();
         return;
     }
 
@@ -553,7 +469,10 @@ void setup()
     if (valid) {
         gfx::clear();
         gfx::setCursor(8, 22);
-        gfx::print("Hold B for Menu...");
+        gfx::print("PHSI245 OS");
+        gfx::drawFastHLine(0, GFX_HEIGHT - 9, GFX_WIDTH, GFX_WHITE);
+        gfx::setCursor(2, GFX_HEIGHT - 7);
+        gfx::print("A:Prog B:Menu");
         gfx::display();
 
         for (uint32_t t0 = millis(); millis() - t0 < BOOT_BUTTON_WINDOW_MS; ) {
@@ -598,9 +517,6 @@ void setup()
 
     beep::init();
     beep::beep_startup();
-
-    gfx::init();
-    beep::beep_startup();  // confirm display init completed
     gfx::setTextSize(1);
     gfx::setTextColor(GFX_WHITE);
 
@@ -800,11 +716,10 @@ void loop()
         break;
 
     case STATE_MENU: {
-        enum MenuAction { M_PONG, M_CALIBRATE, M_FORMAT, M_MSD, M_PROGRAMMING, M_RESTART };
-        const char *items[6];
-        uint8_t menuActions[6];
+        enum MenuAction { M_CALIBRATE, M_FORMAT, M_MSD, M_PROGRAMMING, M_RESTART };
+        const char *items[5];
+        uint8_t menuActions[5];
         uint8_t itemCount = 0;
-        items[itemCount] = "Play Pong";       menuActions[itemCount] = M_PONG;       itemCount++;
         items[itemCount] = "Calibrate Touch"; menuActions[itemCount] = M_CALIBRATE; itemCount++;
         if (storage::sdAvailable()) {
             items[itemCount] = "Format SD Card";    menuActions[itemCount] = M_FORMAT; itemCount++;
@@ -833,9 +748,6 @@ void loop()
         }
         if (input::justPressed(PIN_BTN_A)) {
             switch (menuActions[cursor]) {
-            case M_PONG:
-                state = STATE_PONG;
-                break;
             case M_CALIBRATE:
                 state = STATE_CALIBRATE;
                 break;
@@ -878,19 +790,6 @@ void loop()
             }
         }
         ostime::delay_ms(80);
-        break;
-    }
-
-    case STATE_PONG: {
-        pong::update();
-        pong::draw();
-        gfx::display();
-
-        if (!pong::isPlaying() && input::justPressed(PIN_BTN_B)) {
-            state = STATE_MENU;
-            cursor = 0;
-        }
-        ostime::delay_ms(25);
         break;
     }
 
@@ -982,8 +881,6 @@ void loop()
     case STATE_MSD: {
         static uint32_t lastDraw = 0;
         static bool     lastConnected = false;
-        static uint16_t dbgTick  = 0;
-        dbgTick++;
         uint32_t now    = millis();
         bool     connected = usb_msd::isConnected();
 
@@ -997,53 +894,12 @@ void loop()
             gfx::clear();
             drawHeader("USB Mass Storage");
 
-            // --- Temporary diagnostics ---
-            // All counts hex (fixed width, never overflows 128px).
-            // C=connected, T=loop tick (freezes if the loop dies), BR=bus
-            // resets, OP=last opcode, L=last LBA, CB=CBWs, TG=EP2 OUT
-            // toggle-mismatch drops, BT=total ms in BOT transfers, SD=total
-            // ms in SD reads, RC=READ_10 commands, RD=SD readBlock calls,
-            // B=512 dummy SPI bytes in ms (byte-loop floor), F=SD read
-            // failures.
-            gfx::setCursor(4, LIST_Y + 4);
-            gfx::print("C:");
-            gfx::print(connected ? (int16_t)1 : (int16_t)0);
-            gfx::print(" T:");
-            printHex16(dbgTick);
-            gfx::print(" BR:");
-            printHex16(usb_msd::busResetCount());
+            gfx::setCursor(4, LIST_Y + 14);
+            gfx::print(connected ? "Connected" : "Waiting for host...");
 
-            gfx::setCursor(4, LIST_Y + 12);
-            gfx::print("OP:");
-            printHex(usb_msd::lastOpcode());
-            gfx::print(" L:");
-            printHex16(usb_msd::lastLBA());
-
-            gfx::setCursor(4, LIST_Y + 20);
-            gfx::print("CB:");
-            printHex16(usb_msd::cbwCount());
-            gfx::print(" TG:");
-            printHex16(usb_msd::togFailCount());
-
-            gfx::setCursor(4, LIST_Y + 28);
-            gfx::print("BT:");
-            printHex16(usb_msd::busyMs());
-            gfx::print(" SD:");
-            printHex16(sd::readUs() / 1000);
-
-            gfx::setCursor(4, LIST_Y + 36);
-            gfx::print("RC:");
-            printHex16(usb_msd::readCmdCount());
-            gfx::print(" RD:");
-            printHex16(sd::readCalls());
-
-            gfx::setCursor(4, LIST_Y + 44);
-            gfx::print("G:");
-            printHex16(usb_msd::maxInGap());   // max inter-packet gap (us)
-            gfx::print(" S:");
-            printHex16(usb_msd::bigGapCount()); // data-packet gaps > 200us
-            gfx::print(" F:");
-            printHex16(usb_msd::sdFailCount());
+            gfx::drawFastHLine(0, GFX_HEIGHT - 9, GFX_WIDTH, GFX_WHITE);
+            gfx::setCursor(2, GFX_HEIGHT - 7);
+            gfx::print("B:Exit");
             gfx::display();
         }
 

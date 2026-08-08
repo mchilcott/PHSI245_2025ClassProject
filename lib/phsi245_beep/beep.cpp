@@ -17,15 +17,32 @@ void init()
     digitalWrite(PIN_BEEP, PIN_BEEP_OFF);
 }
 
+// Busy-wait `us` microseconds using the SysTick counter. 32-bit only: the
+// core's delayMicroseconds() does 64-bit math and drags in __udivdi3, but
+// (us-1) * ticksPerMs stays below 2^32 for us < ~89 ms at 48 MHz — which
+// covers every period the beep produces (freq >= ~12 Hz).
+static void delayUs(uint32_t us)
+{
+    uint32_t tickPerMs = SysTick->CMP + 1;
+    uint32_t nbTicks   = ((us - 1) * tickPerMs) / 1000;
+    uint32_t elapsed   = 0;
+    uint32_t oldTicks  = SysTick->CNT;
+    while (elapsed < nbTicks) {
+        uint32_t t = SysTick->CNT;
+        elapsed += (oldTicks <= t) ? t - oldTicks : tickPerMs - oldTicks + t;
+        oldTicks = t;
+    }
+}
+
 void beep_ms(uint16_t duration_ms)
 {
     // Toggle at ~2 kHz for audible beep
     uint32_t end = millis() + duration_ms;
     while (millis() < end) {
         digitalWrite(PIN_BEEP, LOW);
-        delayMicroseconds(250);
+        delayUs(250);
         digitalWrite(PIN_BEEP, PIN_BEEP_OFF);
-        delayMicroseconds(250);
+        delayUs(250);
     }
 }
 
@@ -55,9 +72,9 @@ void tone(uint16_t freqHz, uint16_t durationMs)
 
     while (millis() < end) {
         digitalWrite(PIN_BEEP, LOW);
-        delayMicroseconds(halfPeriodUs);
+        delayUs(halfPeriodUs);
         digitalWrite(PIN_BEEP, PIN_BEEP_OFF);
-        delayMicroseconds(halfPeriodUs);
+        delayUs(halfPeriodUs);
     }
 }
 

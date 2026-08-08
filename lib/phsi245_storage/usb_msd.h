@@ -42,7 +42,5 @@ uint16_t togByState(uint8_t state); // mismatches broken down by BOT state (0..3
 uint32_t inPktCount();      // EP1 IN packets sent (data+CSW) since init()
 uint32_t busyMs();          // total ms spent inside BOT transfers since init()
 uint32_t readCmdCount();    // READ_10 CBWs processed since init()
-uint32_t maxInGap();        // max gap between consecutive EP1 data packets (us)
-uint32_t bigGapCount();     // EP1 data-packet gaps > 200us (host polling pauses)
 
 } // namespace usb_msd

@@ -14,19 +14,19 @@
 // bootloader image, or loading an app corrupts the bootloader's flash image
 // (the .data initializers in its tail) and the device comes up dead. The
 // Makefile's build target rejects a bootloader image that does not fit below
-// APP_BASE. The bootloader currently ends at ~0x80BC; 0x8100 keeps 68 bytes
-// of headroom and only costs games 257 bytes of budget.
+// APP_BASE. The bootloader currently ends at ~0x6EA0; 0x6F00 keeps 96 bytes
+// of headroom.
 //
-//   0x0000_0000 - 0x0000_80FF   bootloader (must end below APP_BASE)
-//   0x0000_8100 - 0x0000_F6FF   app code    (APP_BASE, up to APP_MAX_SIZE)
+//   0x0000_0000 - 0x0000_6EFF   bootloader (must end below APP_BASE)
+//   0x0000_6F00 - 0x0000_F6FF   app code    (APP_BASE, up to APP_MAX_SIZE)
 //   0x0000_F700 - 0x0000_F7FF   app descriptor page (magic/loadaddr/size/crc)
 //   (device flash ends at 0x0000_F7FF = 62 KB; no tail beyond that)
 
 // Physical flash region base (not the alias). Matches FLASH_BASE in the HAL.
 #define FLASH_REGION_BASE 0x08000000u
 
-#define APP_BASE         0x00008100u
-#define APP_MAX_SIZE     0x75FFu   // 30207 bytes (app region minus descriptor page)
+#define APP_BASE         0x00006F00u
+#define APP_MAX_SIZE     0x8800u   // 34816 bytes (app region minus descriptor page)
 #define DESC_ADDR        0x0000F700u
 #define APP_MAGIC        0x35324850u  // "PH25" as little-endian u32
 

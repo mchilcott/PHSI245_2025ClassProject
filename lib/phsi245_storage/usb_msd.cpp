@@ -276,11 +276,6 @@ static volatile uint32_t dbgCbwCount  = 0;   // CBWs received & processed
 static volatile uint32_t dbgTogFails  = 0;   // EP2 OUT toggle mismatches (dropped pkts)
 static volatile uint32_t dbgInPkts    = 0;   // EP1 IN packets sent (data+CSW)
 static volatile uint32_t dbgTogByState[4] = {0,0,0,0};  // mismatches per BOT state
-// Per-packet gap timing: time between consecutive EP1 data completions, to
-// distinguish device-side NAK bubbles from the host's full-speed polling rate.
-static volatile uint32_t dbgLastDataT = 0;   // micros() of last data completion
-static volatile uint32_t dbgMaxGap    = 0;   // max inter-data-packet gap (us)
-static volatile uint32_t dbgBigGaps   = 0;   // data-packet gaps > 200us
 static uint32_t dbgBusyMs   = 0;   // total ms in a BOT transfer (loop-side)
 static uint32_t dbgReadCmds = 0;   // READ_10 CBWs processed
 
@@ -674,7 +669,6 @@ static void msdFillTx()
     }
 
     txDrainIdx = 0;
-    dbgLastDataT = 0;  // sector start — only consecutive same-sector gaps count
     uint16_t n = (txRemain > 64) ? 64 : (uint16_t)txRemain;
     ep1Send(msdBuf[0], n);
     txBufPos = n;
@@ -800,7 +794,6 @@ static void processWriteCBW()
 
 static void sendCSW()
 {
-    dbgLastDataT = 0;  // command boundary — start a fresh gap run
     botState = BOT_CSW;
     ep1Send(&csw, BOT_CSW_LEN);
 }
@@ -1009,16 +1002,6 @@ uint32_t usb_msd::readCmdCount()
     return dbgReadCmds;
 }
 
-uint32_t usb_msd::maxInGap()
-{
-    return dbgMaxGap;
-}
-
-uint32_t usb_msd::bigGapCount()
-{
-    return dbgBigGaps;
-}
-
 bool usb_msd::update()
 {
     if (!usbInitialized) return false;
@@ -1057,7 +1040,6 @@ bool usb_msd::update()
             txWaitPend = false;
             txPendFull = false;
             txDrainIdx = txPendIdx;
-            dbgLastDataT = 0;  // sector start — fresh gap run
             uint16_t n = (txRemain > 64) ? 64 : (uint16_t)txRemain;
             ep1Send(msdBuf[txDrainIdx], n);
             txBufPos = n;
@@ -1126,13 +1108,6 @@ extern "C" void USBFS_IRQHandler(void)
                         sendCSW();              // data phase complete — queue CSW now
                     } else if (txBufPos != 0) {
                         dbgInPkts++;
-                        uint32_t nt = micros();
-                        if (dbgLastDataT != 0) {
-                            uint32_t g = nt - dbgLastDataT;
-                            if (g > dbgMaxGap) dbgMaxGap = g;
-                            if (g > 200) dbgBigGaps++;
-                        }
-                        dbgLastDataT = nt;
                         uint16_t n = (txRemain > 64) ? 64 : (uint16_t)txRemain;
                         ep1Send(msdBuf[txDrainIdx] + txBufPos, n);
                         txBufPos += n;

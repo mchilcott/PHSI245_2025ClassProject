@@ -26,14 +26,6 @@ uint32_t blockCount();
 // Raw byte read (bypasses block buffer, for internal use)
 uint8_t spiRecv();
 
-// Diagnostic timing (temporary): readBlock() invocation count, total µs spent
-// inside it, the longest single call, and a one-shot benchmark of 512 dummy
-// SPI bytes (the byte-loop floor), since init().
-uint32_t readCalls();
-uint32_t readUs();
-uint32_t maxReadUs();
-uint32_t benchUs();
-
 // Multi-block read (CMD18): beginReadMulti() streams from `block` with the
 // card left selected; readMultiBlock() pulls each 512-byte sector; endReadMulti()
 // stops the stream and deselects. beginReadMulti returns R1 (0 = accepted).

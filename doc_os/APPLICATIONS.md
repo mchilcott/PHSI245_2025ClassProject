@@ -283,12 +283,12 @@ The `build-game` target overrides `src_dir` via the `PLATFORMIO_SRC_DIR`
 environment variable, so `platformio.ini` is never modified. The OS libraries
 in `lib/` are automatically found by PlatformIO's dependency finder.
 
-The build links the game for the app region (`linker/app_flash.ld`, flash
-`0x8100`–`0xF6FF`, 30207 bytes max) and wraps the result with a 20-byte
-`PH25` header + CRC-32 (`prog_tools/mkapp.py`), producing
-`build/games/<GAME>.bin`. Copy that file to the SD card and select it with
-**A** in the bootloader browser to flash and boot it. Games larger than 30207
-bytes are rejected at build time.
+The build links the game for the app region using `linker/app_flash.ld`
+(flash bounds `APP_BASE`/`APP_MAX_SIZE`, defined in `src_os/flash_load.h`)
+and wraps the result with a 20-byte `PH25` header + CRC-32
+(`prog_tools/mkapp.py`), producing `build/games/<GAME>.bin`. Copy that file
+to the SD card and select it with **A** in the bootloader browser to flash
+and boot it. Images larger than `APP_MAX_SIZE` are rejected at build time.
 
 A game is fully self-contained at runtime: the WCH startup (`_start` →
 `handle_reset`) re-initializes SP, `.data`, `.bss`, sets `mtvec` to the game's

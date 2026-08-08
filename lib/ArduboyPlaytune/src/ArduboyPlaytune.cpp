@@ -174,7 +174,9 @@ void ArduboyPlaytune::playNote(byte chan, byte note)
 void ArduboyPlaytune::stopNote(byte chan)
 {
   digitalWrite(PIN_BEEP, PIN_BEEP_OFF);
-  tim3.pause();
+  // Keep the timer running so score waits (counted in timer_tick()) still
+  // expire; only stop sounding the note.
+  wait_timer_playing = false;
 }
 
 void ArduboyPlaytune::playScore(const byte *score)
@@ -190,6 +192,7 @@ void ArduboyPlaytune::stopScore()
   for (uint8_t i = 0; i < _tune_num_chans; i++)
     stopNote(i);
   tune_playing = false;
+  tim3.pause();
 }
 
 boolean ArduboyPlaytune::playing()
@@ -231,6 +234,7 @@ void ArduboyPlaytune::step()
     }
     else if (opcode == TUNE_OP_STOP) { /* stop score */
       tune_playing = false;
+      tim3.pause();
       break;
     }
   }
@@ -308,14 +312,9 @@ void timer_tick(void)
       digitalWrite(PIN_BEEP, PIN_BEEP_OFF);   // keep pin low after stop
     }
   }
-  else {
-    if (!all_muted) {
-      digitalToggle(PIN_BEEP);  // toggle the pin
-    }
-  }
-
-  // toggle the pin if we're sounding a note
-  if (wait_timer_playing && !mute_score && !all_muted) {
+  else if (wait_timer_playing && !all_muted) {
+    // One toggle per overflow while a score note is sounding. Toggling
+    // twice per overflow would collapse the output into near-DC silence.
     digitalToggle(PIN_BEEP);
   }
   if (tune_playing && wait_toggle_count && --wait_toggle_count == 0) {

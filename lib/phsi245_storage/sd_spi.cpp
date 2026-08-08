@@ -48,16 +48,15 @@
 #define CT_SDC2  0x04
 #define CT_BLOCK 0x08
 
+// Data-transfer clock after init (APB2 = 48 MHz / prescaler). Prescaler_4 =
+// ~12 MHz. A 6 MHz data clock was tested against the beep wedge and made no
+// difference, so we keep the faster 12 MHz. Options: _8=~6MHz, _16=~3MHz.
+static const uint16_t SD_DATA_CLOCK = SPI_BaudRatePrescaler_4;
+
 namespace sd {
 
 static uint8_t CardType = 0;  // b0:MMC, b1:SDv1, b2:SDv2, b3:block addressing
 static uint32_t blocks = 0;   // total block count (read from CSD at init)
-
-// --- Diagnostic timing (temporary) ---
-static uint32_t dbgReadCalls = 0;   // readBlock() invocations
-static uint32_t dbgReadUs    = 0;   // total µs inside readBlock()
-static uint32_t dbgMaxReadUs = 0;   // longest single readBlock()
-static uint32_t dbgBenchUs   = 0;   // 512 dummy SPI bytes (byte-loop floor)
 
 // --- Byte I/O layer (platform dependent) ---
 // To migrate to ChaN's bit-bang driver (sdmm.c), replace xchg_spi with the
@@ -213,29 +212,23 @@ void probeReadCmd(uint32_t block, uint8_t *r1, uint8_t *token)
 }
 
 /*-----------------------------------------------------------------------*/
-/* Initialize the card                                                   */
+/* Initialize the card (shared core)                                     */
 /*-----------------------------------------------------------------------*/
-bool init()
+// Runs ChaN's card-identification sequence and re-arms the card exactly like
+// init(): CardType/blocks set, SPI clock raised to 12 MHz on success.
+static bool doInit()
 {
-    spi_init();
-
-    // FCLK_SLOW() equivalent is already in effect: spi_init() runs SPI1 at
-    // prescaler 256 (~187kHz, below the 400kHz SD init limit). Once the card
-    // is identified below we raise the clock (ChaN's FCLK_FAST()) so data
-    // transfers run at ~12MHz instead of ~187kHz (~64x faster). The SPI-clock
-    // theory for the USB bread errors was falsified (identical failures at
-    // 12/6/3MHz while device-side SD reads showed 0 fails), so 12MHz is safe.
-
-    for (int n = 10; n; n--) xchg_spi(0xFF);  // 80 dummy clocks, card gets ready
-
     uint8_t ty = 0, cmd, ocr[4];
     uint32_t t0 = millis();
 
-    if (send_cmd(CMD0, 0) == 1) {         // Enter Idle state
-        if (send_cmd(CMD8, 0x1AA) == 1) { // SDv2?
+    uint8_t c0r1 = send_cmd(CMD0, 0);         // Enter Idle state
+    if (c0r1 == 1) {
+        uint8_t c8r1 = send_cmd(CMD8, 0x1AA); // SDv2?
+        if (c8r1 == 1) {
             for (int n = 0; n < 4; n++) ocr[n] = xchg_spi(0xFF);  // R7 response tail
             if (ocr[2] == 0x01 && ocr[3] == 0xAA) {  // Voltage range 2.7-3.6V ok
-                while ((uint32_t)(millis() - t0) < 1000 && send_cmd(ACMD41, 1UL << 30)) ;  // ACMD41(HCS)
+                while ((uint32_t)(millis() - t0) < 1000 && send_cmd(ACMD41, 1UL << 30))  // ACMD41(HCS)
+                    ;
                 if ((uint32_t)(millis() - t0) < 1000 && send_cmd(CMD58, 0) == 0) {  // Check CCS in OCR
                     for (int n = 0; n < 4; n++) ocr[n] = xchg_spi(0xFF);
                     ty = (ocr[0] & 0x40) ? CT_SDC2 | CT_BLOCK : CT_SDC2;
@@ -255,31 +248,42 @@ bool init()
     CardType = ty;
     deselect();
 
-    if (!ty) {
-        blocks = 0;
-        return false;
-    }
-
     // Read CSD to obtain the total block count (ChaN's GET_SECTOR_COUNT)
-    blocks = 0;
-    uint8_t csd[16];
-    if (send_cmd(CMD9, 0) == 0 && rcvr_datablock(csd, 16)) {
-        uint32_t cs;
-        if ((csd[0] >> 6) == 1) {  // CSD ver 2.00 (SDHC/SDXC)
-            cs = csd[9] + ((uint32_t)csd[8] << 8) + ((uint32_t)(csd[7] & 63) << 16) + 1;
-            blocks = cs << 10;
-        } else {                   // CSD ver 1.XX or MMC
-            uint8_t n = (csd[5] & 15) + ((csd[10] & 128) >> 7) + ((csd[9] & 3) << 1) + 2;
-            cs = (csd[8] >> 6) + ((uint32_t)csd[7] << 2) + ((uint32_t)(csd[6] & 3) << 10) + 1;
-            blocks = cs << (n - 9);
+    uint32_t blk = 0;
+    if (ty) {
+        uint8_t csd[16];
+        if (send_cmd(CMD9, 0) == 0 && rcvr_datablock(csd, 16)) {
+            uint32_t cs;
+            if ((csd[0] >> 6) == 1) {  // CSD ver 2.00 (SDHC/SDXC)
+                cs = csd[9] + ((uint32_t)csd[8] << 8) + ((uint32_t)(csd[7] & 63) << 16) + 1;
+                blk = cs << 10;
+            } else {                   // CSD ver 1.XX or MMC
+                uint8_t n = (csd[5] & 15) + ((csd[10] & 128) >> 7) + ((csd[9] & 3) << 1) + 2;
+                cs = (csd[8] >> 6) + ((uint32_t)csd[7] << 2) + ((uint32_t)(csd[6] & 3) << 10) + 1;
+                blk = cs << (n - 9);
+            }
         }
+        deselect();
     }
-    deselect();
+    blocks = blk;
+    if (blk > 0)
+        spi_set_prescaler(SD_DATA_CLOCK);  // data clock after init
+    return blk > 0;
+}
 
-    bool ok = blocks > 0;
-    if (ok)
-        spi_set_prescaler(SPI_BaudRatePrescaler_4);  // FCLK_FAST(): ~12 MHz data clock (24 MHz was marginal: card undetectable)
-    return ok;
+bool init()
+{
+    spi_init();
+
+    // FCLK_SLOW() equivalent is already in effect: spi_init() runs SPI1 at
+    // prescaler 256 (~187kHz, below the 400kHz SD init limit). Once the card
+    // is identified below we raise the clock (ChaN's FCLK_FAST()) to
+    // SD_DATA_CLOCK above (~12 MHz). A 6 MHz data clock showed no difference
+    // against the beep-driven wedge, so the faster clock is kept.
+
+    for (int n = 10; n; n--) xchg_spi(0xFF);  // 80 dummy clocks, card gets ready
+
+    return doInit();
 }
 
 /*-----------------------------------------------------------------------*/
@@ -292,47 +296,10 @@ bool readBlock(uint32_t block, uint8_t *buf)
     uint32_t sect = block;
     if (!(CardType & CT_BLOCK)) sect <<= 9;  // Byte addressing for SDSC
 
-    uint32_t t0 = micros();
     bool ok = (send_cmd(CMD17, sect) == 0) && rcvr_datablock(buf, 512);
     deselect();
 
-    uint32_t dt = micros() - t0;
-    dbgReadCalls++;
-    dbgReadUs += dt;
-    if (dt > dbgMaxReadUs) dbgMaxReadUs = dt;
-
-    // One-shot: time 512 dummy bytes to measure the pure SPI byte-loop cost
-    // (the floor a 512-byte block can never go below at this clock). Runs
-    // once, post-init, and does not touch the token-wait control flow.
-    static bool benchDone = false;
-    if (!benchDone) {
-        benchDone = true;
-        uint32_t b0 = micros();
-        for (int i = 0; i < 512; i++) xchg_spi(0xFF);
-        dbgBenchUs = micros() - b0;
-    }
-
     return ok;
-}
-
-uint32_t readCalls()
-{
-    return dbgReadCalls;
-}
-
-uint32_t readUs()
-{
-    return dbgReadUs;
-}
-
-uint32_t maxReadUs()
-{
-    return dbgMaxReadUs;
-}
-
-uint32_t benchUs()
-{
-    return dbgBenchUs;
 }
 
 /*-----------------------------------------------------------------------*/

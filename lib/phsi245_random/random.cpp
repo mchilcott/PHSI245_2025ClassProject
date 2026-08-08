@@ -27,8 +27,10 @@ uint16_t next(uint16_t max)
     x ^= x << 5;
     state = x;
 
-    // Map to [0, max-1] without division for small ranges
-    return (uint16_t)(((uint32_t)x * max) >> 16);
+    // Map to [0, max-1] without division. Take the top 16 bits of x
+    // before multiplying so the product fits in 32 bits; a direct
+    // (x * max) >> 16 would wrap modulo 2^32 and ignore max.
+    return (uint16_t)(((uint32_t)(x >> 16) * max) >> 16);
 }
 
 uint16_t next(uint16_t min, uint16_t max)

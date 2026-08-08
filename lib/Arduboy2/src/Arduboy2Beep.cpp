@@ -8,7 +8,8 @@
 #include "Arduboy2Beep.h"
 #include "HAL.h"
 
-// BeepPin2 is a dummy, while BeepPin1 should work.
+// Both BeepPin1 and BeepPin2 drive the single speaker (PIN_BEEP) via TIM3;
+// BeepPin2 delegates to BeepPin1.
 
 HardwareTimer tim3 (TIM3);
 
@@ -56,6 +57,7 @@ uint8_t BeepPin2::duration = 0;
 
 void BeepPin2::begin()
 {
+  BeepPin1::begin();
 }
 
 void BeepPin2::tone(uint16_t count)
@@ -65,19 +67,15 @@ void BeepPin2::tone(uint16_t count)
 
 void BeepPin2::tone(uint16_t count, uint8_t dur)
 {
-  (void) count; // parameter not used
-
-  duration = dur;
+  BeepPin1::tone(count, dur);
 }
 
 void BeepPin2::timer()
 {
-  if (duration) {
-    --duration;
-  }
+  BeepPin1::timer();
 }
 
 void BeepPin2::noTone()
 {
-  duration = 0;
+  BeepPin1::noTone();
 }

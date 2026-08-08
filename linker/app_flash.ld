@@ -8,13 +8,13 @@ PROVIDE( _stack_size = __stack_size );
 MEMORY
 {
 	/* Game images are linked for the app region above the bootloader.
-	 * APP_BASE 0x00008100, LENGTH 0x75FF (30207 bytes). APP_BASE must stay
+	 * APP_BASE 0x00006F00, LENGTH 0x8800 (34816 bytes). APP_BASE must stay
 	 * page-aligned and above the end of the bootloader image, or loading an
 	 * app corrupts the bootloader's flash tail and the device comes up dead.
 	 * The final 256-byte page at 0x0000F700 is reserved for the bootloader's
 	 * app descriptor (magic + loadaddr + size + crc), so it is excluded here.
 	 * See src/flash_load.h and os/BOOTLOADER.md. */
-	FLASH (rx) : ORIGIN = 0x00008100, LENGTH = 0x75FF
+	FLASH (rx) : ORIGIN = 0x00006F00, LENGTH = 0x8800
 	RAM (xrw) : ORIGIN = 0x20000000, LENGTH = 20K
 }
 

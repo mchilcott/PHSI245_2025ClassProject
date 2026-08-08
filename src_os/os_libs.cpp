@@ -14,7 +14,6 @@ void os_libs_init()
     ostime::init();
     beep::init();
     rng::init();
-    pong::init();
 
     // Check SD availability and retain storage linker symbols
     volatile bool sdCheck = storage::sdAvailable();

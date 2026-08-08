@@ -15,7 +15,7 @@ make build-game GAME=HelloNOISE
 
 The `build-game` target overrides `src_dir` via the `PLATFORMIO_SRC_DIR`
 environment variable, so `platformio.ini` is never modified. The game is
-linked for the app region (`0x8100`+, max 30207 bytes) and wrapped with a
+linked for the app region (`0x6F00`+, max 34816 bytes) and wrapped with a
 20-byte `PH25` header + CRC-32 (`prog_tools/mkapp.py`) into
 `build/games/<GAME>.bin`, so a later bootloader build (which overwrites
 `.pio/build/v2/firmware.bin`) can't clobber it. Copy that file to the SD card
@@ -106,20 +106,26 @@ and file I/O using only the OS libraries (no Arduboy2 dependency).
 ### Picovaders
     Another space invaders clone
 ### Shadowrunner
-    Jump and slide. (Has some problems with the sound not stopping...)
+    Jump and slide.
 ### Snake
     Classic game of feeding the snake and not eating your own tail (or the walls). This is actually running an emulator for a hand-held sega console.
 ### Tiny-1010
     Fill a 10x10 grid in a similar way to tetris.
+### USBHID
+    Composite USB HID device (mouse + keyboard + gamepad over one cable):
+    a HID gamepad mode, a mouse-jiggler mode with manual D-pad control, and a
+    script runner that reads a text file from the SD card and types/keys it on
+    the host. See `USBHID/HID_SCRIPT.md` for the script format.
 ### Virus LQP-79 (VLQP_AB)
     2D shooter
 ### Obono Games
-    None of these have working high-score systems, sorry. Those which have MyArduboyTones in them also have some background sound problems.
+    None of these have working high-score systems, sorry. Sound plays on the
+    single speaker (PA15) via TIM3.
 
-    - Ardubullets: Space Shooter (Sound Problems)
+    - Ardubullets: Space Shooter
     - chiemagari
     - chribocchi: Juggle
-    - evasion: Run away while not running into something (Sound Problems)
+    - evasion: Run away while not running into something
     - gosencho
     - hollow: Don't get crushed
     - hopper: Hop up in 3D without falling

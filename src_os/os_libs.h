@@ -13,7 +13,6 @@
 #include "sd_available.h"
 #include "storage.h"
 #include <HAL.h>
-#include "pong.h"
 #include "usb_msd.h"
 
 void os_libs_init();
