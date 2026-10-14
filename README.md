@@ -11,7 +11,7 @@ See [FirstRun.md](FirstRun.md) to help you get your board running for the first 
  - Install VS Code
  - Install PlatformIO
  - Install Git
- - Load this project
+ - Load this project (`File -> Open Folder` in VS Code. If you have a `Restricted Mode` button where the PlatformIO tools should be, you'll have to click on this and trust this code.)
  - Run `pip install chprog` in the PlatformIO terminal.
 
 The final step depends on your operating system.
