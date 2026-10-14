@@ -12,6 +12,9 @@
 #define PIN_LED_0 PB12
 #define PIN_LED_1 PB13
 
+#define PIN_I2C_SDA PA11
+#define PIN_I2C_SCL PA10
+
 #define PIN_BEEP PA9
 #define PIN_BEEP_OFF HIGH // THe speaker is not drawing current when the pin is high.
 
@@ -22,8 +25,8 @@
 
 // Button Management
     // Tune Sensitivity
-    #define TOUCH_THRESHOLD 0x0E20
-    #define TOUCH_DEBOUNCE  0x01A0
+    #define TOUCH_THRESHOLD 0x0D00
+    #define TOUCH_DEBOUNCE  0x0100
 
     // Detect if a certain pin is currently touched
     extern int IsTouched(unsigned long int channel);

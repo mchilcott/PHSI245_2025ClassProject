@@ -2,13 +2,16 @@
 
 This project contains a collection of games and libraries to support development and playing with the class project, a CH32X035-based hand-held game console, based on the schematic in the `hw` folder.
 
-See `README.md` in `src_games` for details on the working games/apps and how to select them to be programmed.
+See [src_games/README.md](src_games/README.md) for details on the working games/apps and how to select them to be programmed.
+
+See [FirstRun.md](FirstRun.md) to help you get your board running for the first time. 
+
 
 ## Setup for development
  - Install VS Code
  - Install PlatformIO
  - Install Git
- - Load project
+ - Load this project
  - Run `pip install chprog` in the PlatformIO terminal.
 
 The final step depends on your operating system.

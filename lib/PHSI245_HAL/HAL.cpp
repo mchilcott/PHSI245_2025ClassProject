@@ -31,8 +31,6 @@ void initTouchButtons()
 
 }
 
-// TODO: Add some hysteresis for debouncing.
-
 uint16_t Touch_Key_Adc(uint8_t ch)
 {
   ADC_RegularChannelConfig(ADC1, ch, 1, ADC_SampleTime_11Cycles );
