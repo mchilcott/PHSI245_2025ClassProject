@@ -22,8 +22,8 @@
 
 // Button Management
     // Tune Sensitivity
-    #define TOUCH_THRESHOLD 0x0E20
-    #define TOUCH_DEBOUNCE  0x01A0
+    #define TOUCH_THRESHOLD 0x0D00
+    #define TOUCH_DEBOUNCE  0x0100
 
     // Detect if a certain pin is currently touched
     extern int IsTouched(unsigned long int channel);
