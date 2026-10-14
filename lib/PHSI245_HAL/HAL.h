@@ -12,6 +12,9 @@
 #define PIN_LED_0 PB12
 #define PIN_LED_1 PB13
 
+#define PIN_I2C_SDA PA11
+#define PIN_I2C_SCL PA10
+
 #define PIN_BEEP PA9
 #define PIN_BEEP_OFF HIGH // THe speaker is not drawing current when the pin is high.
 
