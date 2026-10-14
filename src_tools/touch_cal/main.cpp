@@ -106,6 +106,11 @@ void reportScreen()
                  button_names[i], value[i], value_min[i], value_max[i]);
         arduboy.setCursor(0, 8 * (i + 1));
         arduboy.print(line);
+        if (IsTouched(i))
+            arduboy.print("*");
+        else
+            arduboy.print(" ");
+            
     }
     snprintf(line, sizeof(line), "thr %4u  hyst %4u", TOUCH_THRESHOLD, TOUCH_DEBOUNCE);
     arduboy.setCursor(0, 56);
